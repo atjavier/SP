@@ -1,0 +1,10 @@
+body {
+  background: #f8f9fa;
+}
+
+/* Keep keyboard focus obvious; do not remove outlines. */
+:focus-visible {
+  outline: 2px solid rgba(13, 110, 253, 0.9);
+  outline-offset: 2px;
+}
+

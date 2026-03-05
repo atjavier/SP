@@ -1,0 +1,22 @@
+.venv/
+__pycache__/
+*.py[cod]
+
+# Local environment / secrets
+.env
+.env.*
+
+# Editor / OS
+.vscode/
+.idea/
+Thumbs.db
+
+# App runtime artifacts (future stories)
+instance/
+
+
+#BMAD files
+_bmad/
+_bmad-output/
+.agents/
+.miktex/

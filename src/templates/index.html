@@ -1,0 +1,57 @@
+{% extends "base.html" %}
+
+{% block content %}
+  <div class="row g-4">
+    <div class="col-12 col-lg-5">
+      <section id="upload-section" class="card shadow-sm">
+        <div class="card-body">
+          <h2 class="h5 mb-3">Upload</h2>
+
+          <form>
+            <div class="mb-3">
+              <label for="vcf-file" class="form-label">VCF file</label>
+              <input
+                id="vcf-file"
+                name="vcf_file"
+                class="form-control"
+                type="file"
+                accept=".vcf,.vcf.gz"
+                aria-describedby="vcf-file-help"
+              />
+              <div id="vcf-file-help" class="form-text">
+                Upload handling and validation are not implemented in Story 1.1.
+              </div>
+            </div>
+
+            <button class="btn btn-primary" type="button" disabled>
+              Validate &amp; Run (coming soon)
+            </button>
+          </form>
+        </div>
+      </section>
+    </div>
+
+    <div class="col-12 col-lg-7">
+      <div class="d-grid gap-4">
+        <section id="run-status-section" class="card shadow-sm">
+          <div class="card-body">
+            <h2 class="h5 mb-3">Run Status</h2>
+            <p class="text-secondary mb-0">
+              No run yet. After validation and tool selection, SP will start automatically and show
+              stage-by-stage progress here.
+            </p>
+          </div>
+        </section>
+
+        <section id="results-section" class="card shadow-sm">
+          <div class="card-body">
+            <h2 class="h5 mb-3">Results</h2>
+            <div class="alert alert-info mb-0" role="status">
+              Final results are locked until Reporting succeeds.
+            </div>
+          </div>
+        </section>
+      </div>
+    </div>
+  </div>
+{% endblock %}
