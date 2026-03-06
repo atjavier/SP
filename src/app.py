@@ -45,6 +45,60 @@ def create_app(config_overrides: dict[str, Any] | None = None) -> Flask:
             )
         return jsonify({"ok": True, "data": record})
 
+    @app.post("/api/v1/runs/<run_id>/cancel")
+    def cancel_run(run_id: str):
+        from storage.runs import (
+            RunNotCancelableError,
+            RunNotFoundError,
+            cancel_run as cancel_run_record,
+        )
+
+        try:
+            record = cancel_run_record(app.config["SP_DB_PATH"], run_id)
+        except RunNotFoundError:
+            return (
+                jsonify(
+                    {
+                        "ok": False,
+                        "error": {
+                            "code": "RUN_NOT_FOUND",
+                            "message": "Run not found.",
+                        },
+                    }
+                ),
+                404,
+            )
+        except RunNotCancelableError as exc:
+            return (
+                jsonify(
+                    {
+                        "ok": False,
+                        "error": {
+                            "code": "RUN_NOT_CANCELABLE",
+                            "message": "Run is not cancelable.",
+                            "details": {"current_status": exc.current_status},
+                        },
+                    }
+                ),
+                409,
+            )
+        except Exception:
+            app.logger.exception("Failed to cancel run")
+            return (
+                jsonify(
+                    {
+                        "ok": False,
+                        "error": {
+                            "code": "RUN_CANCEL_FAILED",
+                            "message": "Failed to cancel run.",
+                        },
+                    }
+                ),
+                500,
+            )
+
+        return jsonify({"ok": True, "data": record})
+
     return app
 
 

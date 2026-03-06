@@ -53,6 +53,12 @@ class AppTestCase(unittest.TestCase):
         self.assertIn("id=\"vcf-file-help\"", html)
         self.assertIn("aria-describedby=\"vcf-file-help\"", html)
 
+        self.assertIn("New run", html)
+        self.assertIn("Cancel run", html)
+        self.assertIn("id=\"new-run-btn\"", html)
+        self.assertIn("id=\"cancel-run-btn\"", html)
+        self.assertIn("id=\"current-run-status\"", html)
+
 
 if __name__ == "__main__":
     unittest.main()
