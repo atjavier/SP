@@ -13,7 +13,8 @@ Open `http://127.0.0.1:5000/`.
 
 Notes:
 - Bootstrap loads via CDN in `src/templates/base.html` (internet required for styling in this MVP).
-- `src/app.py` defaults to a dev-only `SECRET_KEY=dev` and runs with `debug=True`.
+- `src/app.py` generates a random `SECRET_KEY` if none is set; set `SECRET_KEY` to keep sessions stable across restarts.
+- Set `FLASK_DEBUG=1` to run with debug enabled.
 
 ## Run tests
 
