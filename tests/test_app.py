@@ -53,6 +53,10 @@ class AppTestCase(unittest.TestCase):
         self.assertIn("id=\"vcf-file-help\"", html)
         self.assertIn("aria-describedby=\"vcf-file-help\"", html)
 
+        self.assertIn("id=\"upload-validate-btn\"", html)
+        self.assertIn("id=\"upload-validation-message\"", html)
+        self.assertIn("id=\"upload-validation-results\"", html)
+
         self.assertIn("New run", html)
         self.assertIn("Cancel run", html)
         self.assertIn("id=\"new-run-btn\"", html)

@@ -19,14 +19,17 @@
                 aria-describedby="vcf-file-help"
               />
               <div id="vcf-file-help" class="form-text">
-                Upload handling and validation are not implemented yet.
+                Upload a VCF for the current run and validate it before starting the pipeline.
               </div>
             </div>
 
-            <button class="btn btn-primary" type="button" disabled>
-              Validate &amp; Run (coming soon)
+            <button id="upload-validate-btn" class="btn btn-primary" type="button">
+              Upload &amp; Validate
             </button>
           </form>
+
+          <div id="upload-validation-message" class="mt-3" role="status" aria-live="polite"></div>
+          <div id="upload-validation-results" class="mt-2"></div>
         </div>
       </section>
     </div>
@@ -77,4 +80,5 @@
   </div>
 
   <script src="{{ url_for('static', filename='run_controls.js') }}"></script>
+  <script src="{{ url_for('static', filename='upload_controls.js') }}"></script>
 {% endblock %}

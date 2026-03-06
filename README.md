@@ -40,3 +40,7 @@ Notes:
 ```powershell
 .\\.venv\\Scripts\\python.exe -m unittest discover -s tests
 ```
+
+## Story docs
+
+- Simple per-story flows: `docs/stories/index.md`

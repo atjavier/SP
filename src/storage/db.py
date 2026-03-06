@@ -10,6 +10,17 @@ CREATE TABLE IF NOT EXISTS runs (
   status TEXT NOT NULL,
   created_at TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS run_inputs (
+  run_id TEXT PRIMARY KEY,
+  original_filename TEXT NOT NULL,
+  stored_filename TEXT NOT NULL,
+  uploaded_at TEXT NOT NULL,
+  validation_ok INTEGER NOT NULL,
+  validation_errors_json TEXT NOT NULL,
+  validation_warnings_json TEXT NOT NULL,
+  FOREIGN KEY (run_id) REFERENCES runs(run_id)
+);
 """
 
 

@@ -9,6 +9,7 @@
     return;
   }
 
+  const STORAGE_KEY = "sp_current_run";
   let currentRunId = null;
 
   function clearMessage() {
@@ -56,6 +57,23 @@
     }
 
     cancelRunBtn.disabled = !currentRunId || status === "canceled";
+
+    try {
+      if (currentRunId) {
+        localStorage.setItem(
+          STORAGE_KEY,
+          JSON.stringify({
+            run_id: currentRunId,
+            status,
+            created_at: run?.created_at ?? null,
+          }),
+        );
+      } else {
+        localStorage.removeItem(STORAGE_KEY);
+      }
+    } catch {
+      // ignore storage failures
+    }
   }
 
   async function postJson(url) {
@@ -113,5 +131,13 @@
       cancelRunBtn.disabled = false;
     }
   });
-})();
 
+  try {
+    const stored = JSON.parse(localStorage.getItem(STORAGE_KEY));
+    if (stored?.run_id) {
+      setRun(stored);
+    }
+  } catch {
+    // ignore storage failures
+  }
+})();
