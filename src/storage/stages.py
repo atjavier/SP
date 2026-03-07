@@ -7,6 +7,20 @@ from datetime import datetime, timezone
 from storage.db import init_schema, open_connection
 
 
+PIPELINE_STAGE_ORDER: tuple[str, ...] = (
+    "parser",
+    "pre_annotation",
+    "classification",
+    "prediction",
+    "annotation",
+    "reporting",
+)
+
+_VALID_STAGE_STATUSES: frozenset[str] = frozenset(
+    {"queued", "running", "succeeded", "failed", "canceled"}
+)
+
+
 @contextmanager
 def _maybe_connection(db_path: str, conn: sqlite3.Connection | None) -> Iterator[sqlite3.Connection]:
     if conn is not None:
@@ -48,6 +62,110 @@ def get_stage(db_path: str, run_id: str, stage_name: str) -> dict | None:
         if row[5] or row[6] or details
         else None,
     }
+
+
+def ensure_pipeline_stages_exist(
+    db_path: str,
+    run_id: str,
+    *,
+    conn: sqlite3.Connection | None = None,
+    commit: bool = True,
+) -> None:
+    with _maybe_connection(db_path, conn) as active:
+        init_schema(active)
+        for stage_name in PIPELINE_STAGE_ORDER:
+            active.execute(
+                """
+                INSERT OR IGNORE INTO run_stages (
+                  run_id, stage_name, status, started_at, completed_at, input_uploaded_at,
+                  stats_json, error_code, error_message, error_details_json
+                )
+                VALUES (?, ?, ?, NULL, NULL, NULL, NULL, NULL, NULL, NULL)
+                """,
+                (run_id, stage_name, "queued"),
+            )
+        if commit:
+            active.commit()
+
+
+def list_pipeline_stages(
+    db_path: str,
+    run_id: str,
+    *,
+    conn: sqlite3.Connection | None = None,
+    backfill_missing: bool = True,
+    commit: bool = True,
+) -> list[dict]:
+    with _maybe_connection(db_path, conn) as active:
+        init_schema(active)
+        if backfill_missing:
+            for stage_name in PIPELINE_STAGE_ORDER:
+                active.execute(
+                    """
+                    INSERT OR IGNORE INTO run_stages (
+                      run_id, stage_name, status, started_at, completed_at, input_uploaded_at,
+                      stats_json, error_code, error_message, error_details_json
+                    )
+                    VALUES (?, ?, ?, NULL, NULL, NULL, NULL, NULL, NULL, NULL)
+                    """,
+                    (run_id, stage_name, "queued"),
+                )
+            if commit:
+                active.commit()
+
+        rows = active.execute(
+            """
+            SELECT stage_name, status, started_at, completed_at, input_uploaded_at, stats_json,
+                   error_code, error_message, error_details_json
+            FROM run_stages
+            WHERE run_id = ?
+            """,
+            (run_id,),
+        ).fetchall()
+
+    by_name: dict[str, dict] = {}
+    for row in rows:
+        stage_name = row[0]
+        if stage_name not in PIPELINE_STAGE_ORDER:
+            continue
+        stats = json.loads(row[5] or "null")
+        details = json.loads(row[8] or "null")
+
+        status = row[1]
+        unknown_status = status not in _VALID_STAGE_STATUSES
+        if unknown_status:
+            status = "failed"
+            if not (row[6] or row[7] or details):
+                details = {"original_status": row[1]}
+                error_code = "UNKNOWN_STAGE_STATUS"
+                error_message = "Stage has an unknown persisted status."
+            else:
+                error_code = row[6]
+                error_message = row[7]
+        else:
+            error_code = row[6]
+            error_message = row[7]
+
+        by_name[stage_name] = {
+            "stage_name": stage_name,
+            "status": status,
+            "started_at": row[2],
+            "completed_at": row[3],
+            "input_uploaded_at": row[4],
+            "stats": stats,
+            "error": {
+                "code": error_code,
+                "message": error_message,
+                "details": details,
+            }
+            if error_code or error_message or details
+            else None,
+        }
+
+    stages: list[dict] = []
+    for stage_name in PIPELINE_STAGE_ORDER:
+        stages.append(by_name.get(stage_name) or {"stage_name": stage_name, "status": "queued"})
+    return stages
 
 
 def mark_stage_running(
@@ -178,6 +296,28 @@ def mark_stage_blocked(
     conn: sqlite3.Connection | None = None,
     commit: bool = True,
 ) -> None:
+    mark_stage_failed(
+        db_path,
+        run_id,
+        stage_name,
+        input_uploaded_at=input_uploaded_at,
+        error_code=error_code,
+        error_message=error_message,
+        error_details=error_details,
+        conn=conn,
+        commit=commit,
+    )
+
+
+def mark_stage_canceled(
+    db_path: str,
+    run_id: str,
+    stage_name: str,
+    *,
+    input_uploaded_at: str | None,
+    conn: sqlite3.Connection | None = None,
+    commit: bool = True,
+) -> None:
     completed_at = datetime.now(timezone.utc).isoformat()
     with _maybe_connection(db_path, conn) as active:
         init_schema(active)
@@ -187,26 +327,17 @@ def mark_stage_blocked(
               run_id, stage_name, status, started_at, completed_at, input_uploaded_at,
               stats_json, error_code, error_message, error_details_json
             )
-            VALUES (?, ?, ?, NULL, ?, ?, NULL, ?, ?, ?)
+            VALUES (?, ?, ?, NULL, ?, ?, NULL, NULL, NULL, NULL)
             ON CONFLICT(run_id, stage_name) DO UPDATE SET
               status = excluded.status,
               completed_at = excluded.completed_at,
               input_uploaded_at = excluded.input_uploaded_at,
               stats_json = NULL,
-              error_code = excluded.error_code,
-              error_message = excluded.error_message,
-              error_details_json = excluded.error_details_json
+              error_code = NULL,
+              error_message = NULL,
+              error_details_json = NULL
             """,
-            (
-                run_id,
-                stage_name,
-                "blocked",
-                completed_at,
-                input_uploaded_at,
-                error_code,
-                error_message,
-                json.dumps(error_details or {}),
-            ),
+            (run_id, stage_name, "canceled", completed_at, input_uploaded_at),
         )
         if commit:
             active.commit()

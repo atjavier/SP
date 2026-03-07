@@ -63,6 +63,8 @@ class AppTestCase(unittest.TestCase):
         self.assertIn("id=\"cancel-run-btn\"", html)
         self.assertIn("id=\"current-run-status\"", html)
         self.assertIn("id=\"current-run-reference-build\"", html)
+        self.assertIn("id=\"current-run-stages\"", html)
+        self.assertIn("id=\"current-run-stages-message\"", html)
 
 
 if __name__ == "__main__":

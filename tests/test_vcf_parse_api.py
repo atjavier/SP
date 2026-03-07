@@ -300,6 +300,31 @@ class VcfParseApiTestCase(unittest.TestCase):
             self.assertIs(payload.get("ok"), False)
             self.assertEqual(payload["error"]["code"], "RUN_CANCELED")
 
+            stages_resp = client.get(f"/api/v1/runs/{run_id}/stages")
+            stages_payload = json.loads(stages_resp.get_data(as_text=True))
+            by_name = {stage["stage_name"]: stage for stage in stages_payload["data"]["stages"]}
+            self.assertEqual(by_name["parser"]["status"], "canceled")
+
+    def test_parse_stage_status_visible_via_stages_endpoint(self):
+        vcf_bytes = b"#CHROM\tPOS\tREF\tALT\n1\t1\tA\tT\n"
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = os.path.join(tmpdir, "sp.db")
+            client = self._create_client(db_path)
+            run_id = self._create_run(client)
+
+            self._upload(client, run_id, vcf_bytes)
+            self.assertEqual(client.post(f"/api/v1/runs/{run_id}/parse").status_code, 200)
+
+            resp = client.get(f"/api/v1/runs/{run_id}/stages")
+            self.assertEqual(resp.status_code, 200)
+            payload = json.loads(resp.get_data(as_text=True))
+            self.assertIs(payload.get("ok"), True)
+            stages = payload["data"]["stages"]
+            by_name = {stage["stage_name"]: stage for stage in stages}
+            self.assertEqual(by_name["parser"]["status"], "succeeded")
+            self.assertEqual(by_name["prediction"]["status"], "queued")
+
 
 if __name__ == "__main__":
     unittest.main()

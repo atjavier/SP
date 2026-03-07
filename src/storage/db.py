@@ -93,6 +93,14 @@ def init_schema(conn: sqlite3.Connection) -> None:
 
 def _apply_schema_migrations(conn: sqlite3.Connection) -> None:
     _ensure_runs_reference_build_column(conn)
+    _normalize_stage_status_vocabulary(conn)
+
+
+def _normalize_stage_status_vocabulary(conn: sqlite3.Connection) -> None:
+    # Legacy databases may contain stage statuses that are no longer part of the
+    # accepted vocabulary (Story 3.2). Normalize them in-place so APIs never
+    # surface unexpected status values.
+    conn.execute("UPDATE run_stages SET status = 'failed' WHERE status = 'blocked';")
 
 
 def _ensure_runs_reference_build_column(conn: sqlite3.Connection) -> None:

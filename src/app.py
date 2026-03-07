@@ -1,5 +1,6 @@
 import os
 import secrets
+import threading
 from typing import Any
 
 from flask import Flask, jsonify, render_template, request
@@ -109,6 +110,178 @@ def create_app(config_overrides: dict[str, Any] | None = None) -> Flask:
             )
 
         return jsonify({"ok": True, "data": record})
+
+    @app.get("/api/v1/runs/<run_id>/stages")
+    def get_run_stages(run_id: str):
+        from storage.runs import get_run as get_run_record
+        from storage.stages import list_pipeline_stages
+
+        db_path = app.config["SP_DB_PATH"]
+
+        try:
+            run = get_run_record(db_path, run_id)
+        except Exception:
+            app.logger.exception("Failed to fetch run record for stage listing")
+            return (
+                jsonify(
+                    {
+                        "ok": False,
+                        "error": {
+                            "code": "RUN_FETCH_FAILED",
+                            "message": "Failed to fetch run record.",
+                        },
+                    }
+                ),
+                500,
+            )
+
+        if not run:
+            return (
+                jsonify(
+                    {
+                        "ok": False,
+                        "error": {
+                            "code": "RUN_NOT_FOUND",
+                            "message": "Run not found.",
+                        },
+                    }
+                ),
+                404,
+            )
+
+        try:
+            stages = list_pipeline_stages(db_path, run_id)
+        except Exception:
+            app.logger.exception("Failed to fetch run stages")
+            return (
+                jsonify(
+                    {
+                        "ok": False,
+                        "error": {
+                            "code": "RUN_STAGES_FETCH_FAILED",
+                            "message": "Failed to fetch run stages.",
+                        },
+                    }
+                ),
+                500,
+            )
+
+        return jsonify({"ok": True, "data": {"run_id": run_id, "stages": stages}})
+
+    @app.post("/api/v1/runs/<run_id>/start")
+    def start_run(run_id: str):
+        from pipeline.orchestrator import OrchestratorError, prepare_pipeline_start, run_pipeline
+        from storage.runs import (
+            AnotherRunRunningError,
+            RunAlreadyRunningError,
+            RunNotFoundError,
+            RunNotStartableError,
+            claim_run_for_execution,
+            set_run_status_if_not_canceled,
+        )
+
+        db_path = app.config["SP_DB_PATH"]
+
+        try:
+            prepared = prepare_pipeline_start(db_path, run_id)
+        except OrchestratorError as exc:
+            error: dict[str, Any] = {"code": exc.code, "message": exc.message}
+            if exc.details:
+                error["details"] = exc.details
+            return jsonify({"ok": False, "error": error}), exc.http_status
+
+        started_stage = prepared.get("started_stage")
+        if started_stage is None:
+            run = prepared.get("run") or {}
+            return jsonify(
+                {
+                    "ok": True,
+                    "data": {"run_id": run_id, "status": run.get("status"), "started_stage": None},
+                }
+            )
+
+        try:
+            claim_run_for_execution(db_path, run_id)
+        except AnotherRunRunningError as exc:
+            return (
+                jsonify(
+                    {
+                        "ok": False,
+                        "error": {
+                            "code": "ANOTHER_RUN_RUNNING",
+                            "message": "Another run is currently running.",
+                            "details": {"running_run_id": exc.running_run_id},
+                        },
+                    }
+                ),
+                409,
+            )
+        except RunAlreadyRunningError:
+            return (
+                jsonify(
+                    {
+                        "ok": False,
+                        "error": {"code": "RUN_ALREADY_RUNNING", "message": "Run is already running."},
+                    }
+                ),
+                409,
+            )
+        except RunNotStartableError:
+            return (
+                jsonify(
+                    {
+                        "ok": False,
+                        "error": {"code": "RUN_CANCELED", "message": "Run is canceled and cannot be started."},
+                    }
+                ),
+                409,
+            )
+        except RunNotFoundError:
+            return (
+                jsonify({"ok": False, "error": {"code": "RUN_NOT_FOUND", "message": "Run not found."}}),
+                404,
+            )
+        except Exception:
+            app.logger.exception("Failed to start run")
+            return (
+                jsonify(
+                    {
+                        "ok": False,
+                        "error": {"code": "RUN_START_FAILED", "message": "Failed to start run."},
+                    }
+                ),
+                500,
+            )
+
+        def _background_execute():
+            try:
+                run_pipeline(
+                    db_path,
+                    run_id,
+                    max_decompressed_bytes=app.config["SP_MAX_VCF_DECOMPRESSED_BYTES"],
+                    logger=app.logger,
+                )
+            except OrchestratorError as exc:
+                app.logger.warning(
+                    "Pipeline orchestration stopped for run_id=%s code=%s message=%s details=%s",
+                    run_id,
+                    exc.code,
+                    exc.message,
+                    exc.details,
+                )
+            except Exception:
+                app.logger.exception("Pipeline orchestration crashed for run_id=%s", run_id)
+            finally:
+                try:
+                    set_run_status_if_not_canceled(db_path, run_id, "queued")
+                except Exception:
+                    app.logger.exception("Failed to reset run status for run_id=%s", run_id)
+
+        threading.Thread(target=_background_execute, daemon=True).start()
+
+        return jsonify(
+            {"ok": True, "data": {"run_id": run_id, "status": "running", "started_stage": started_stage}}
+        )
 
     @app.post("/api/v1/runs/<run_id>/cancel")
     def cancel_run(run_id: str):
@@ -280,27 +453,14 @@ def create_app(config_overrides: dict[str, Any] | None = None) -> Flask:
 
     @app.post("/api/v1/runs/<run_id>/parse")
     def parse_uploaded_vcf(run_id: str):
-        import os as _os
-        import uuid as _uuid
-        from datetime import datetime, timezone
-
-        from storage.db import connect as _connect_db
-        from storage.db import init_schema as _init_schema
-        from storage.run_inputs import (
-            delete_run_upload_checked,
-            get_run_input,
-            get_run_upload_path,
-        )
+        from storage.run_inputs import get_run_input, get_run_upload_path
         from storage.runs import get_run as get_run_record
         from storage.stages import (
             get_stage,
-            mark_stage_blocked,
+            mark_stage_canceled,
             mark_stage_failed,
-            mark_stage_running,
-            mark_stage_succeeded,
         )
-        from storage.variants import clear_variants_for_run
-        from vcf_parser import VcfParseError, iter_vcf_snv_records
+        from pipeline.parser_stage import StageExecutionError, run_parser_stage
 
         db_path = app.config["SP_DB_PATH"]
 
@@ -312,13 +472,11 @@ def create_app(config_overrides: dict[str, Any] | None = None) -> Flask:
             )
 
         if run.get("status") == "canceled":
-            mark_stage_blocked(
+            mark_stage_canceled(
                 db_path,
                 run_id,
                 "parser",
                 input_uploaded_at=None,
-                error_code="RUN_CANCELED",
-                error_message="Run is canceled and cannot be parsed.",
             )
             return (
                 jsonify(
@@ -335,7 +493,7 @@ def create_app(config_overrides: dict[str, Any] | None = None) -> Flask:
 
         run_input = get_run_input(db_path, run_id)
         if not run_input:
-            mark_stage_blocked(
+            mark_stage_failed(
                 db_path,
                 run_id,
                 "parser",
@@ -354,7 +512,7 @@ def create_app(config_overrides: dict[str, Any] | None = None) -> Flask:
             )
 
         if not run_input.get("validation", {}).get("ok"):
-            mark_stage_blocked(
+            mark_stage_failed(
                 db_path,
                 run_id,
                 "parser",
@@ -403,248 +561,24 @@ def create_app(config_overrides: dict[str, Any] | None = None) -> Flask:
                     409,
                 )
 
-        if stage and stage.get("status") == "succeeded" and stage.get("input_uploaded_at") == uploaded_at:
-            return (
-                jsonify(
-                    {
-                        "ok": False,
-                        "error": {"code": "ALREADY_PARSED", "message": "This upload was already parsed."},
-                    }
-                ),
-                409,
-            )
-
         upload_path = get_run_upload_path(db_path, run_id)
-        if not upload_path or not _os.path.exists(upload_path):
-            mark_stage_blocked(
+        try:
+            result = run_parser_stage(
                 db_path,
                 run_id,
-                "parser",
-                input_uploaded_at=uploaded_at,
-                error_code="VCF_ATTACHMENT_MISSING",
-                error_message="VCF attachment is missing on disk.",
-                error_details={"path": upload_path},
+                uploaded_at=uploaded_at,
+                upload_path=upload_path,
+                max_decompressed_bytes=app.config["SP_MAX_VCF_DECOMPRESSED_BYTES"],
+                logger=app.logger,
+                force=force,
             )
-            return (
-                jsonify(
-                    {
-                        "ok": False,
-                        "error": {
-                            "code": "VCF_ATTACHMENT_MISSING",
-                            "message": "VCF attachment is missing on disk.",
-                        },
-                    }
-                ),
-                409,
-            )
+        except StageExecutionError as exc:
+            error: dict[str, Any] = {"code": exc.code, "message": exc.message}
+            if exc.details:
+                error["details"] = exc.details
+            return jsonify({"ok": False, "error": error}), exc.http_status
 
-        stats: dict = {}
-        sample: list[dict] = []
-        created_at = datetime.now(timezone.utc).isoformat()
-        rows: list[tuple] = []
-        attempted = 0
-        inserted = 0
-
-        try:
-            conn = _connect_db(db_path)
-            try:
-                _init_schema(conn)
-                conn.execute("BEGIN")
-
-                mark_stage_running(
-                    db_path, run_id, "parser", input_uploaded_at=uploaded_at, conn=conn, commit=False
-                )
-                clear_variants_for_run(db_path, run_id, conn=conn, commit=False)
-
-                for record in iter_vcf_snv_records(
-                    upload_path,
-                    stats=stats,
-                    sample=sample,
-                    sample_limit=10,
-                    max_decompressed_bytes=app.config.get("SP_MAX_VCF_DECOMPRESSED_BYTES"),
-                ):
-                    rows.append(
-                        (
-                            str(_uuid.uuid4()),
-                            run_id,
-                            record["chrom"],
-                            int(record["pos"]),
-                            record["ref"],
-                            record["alt"],
-                            record.get("source_line"),
-                            created_at,
-                        )
-                    )
-
-                    if len(rows) >= 500:
-                        attempted += len(rows)
-                        before = conn.total_changes
-                        conn.executemany(
-                            """
-                            INSERT OR IGNORE INTO run_variants (
-                              variant_id, run_id, chrom, pos, ref, alt, source_line, created_at
-                            )
-                            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                            """,
-                            rows,
-                        )
-                        inserted += conn.total_changes - before
-                        rows.clear()
-
-                if rows:
-                    attempted += len(rows)
-                    before = conn.total_changes
-                    conn.executemany(
-                        """
-                        INSERT OR IGNORE INTO run_variants (
-                          variant_id, run_id, chrom, pos, ref, alt, source_line, created_at
-                        )
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                        """,
-                        rows,
-                    )
-                    inserted += conn.total_changes - before
-
-                stats["snv_records_persisted"] = inserted
-                stats["duplicate_records_ignored"] = max(0, attempted - inserted)
-
-                mark_stage_succeeded(
-                    db_path,
-                    run_id,
-                    "parser",
-                    input_uploaded_at=uploaded_at,
-                    stats=stats,
-                    conn=conn,
-                    commit=False,
-                )
-                conn.commit()
-            finally:
-                conn.close()
-
-        except VcfParseError as exc:
-            try:
-                conn = _connect_db(db_path)
-                try:
-                    _init_schema(conn)
-                    conn.execute("BEGIN")
-                    clear_variants_for_run(db_path, run_id, conn=conn, commit=False)
-                    mark_stage_failed(
-                        db_path,
-                        run_id,
-                        "parser",
-                        input_uploaded_at=uploaded_at,
-                        error_code=exc.code,
-                        error_message=exc.message,
-                        error_details={"line_number": exc.line_number, **(exc.details or {})},
-                        conn=conn,
-                        commit=False,
-                    )
-                    conn.commit()
-                finally:
-                    conn.close()
-            except Exception:
-                app.logger.exception("Failed to persist parser failure state")
-            return (
-                jsonify(
-                    {
-                        "ok": False,
-                        "error": {
-                            "code": "VCF_PARSE_FAILED",
-                            "message": "Failed to parse VCF.",
-                            "details": {
-                                "error_code": exc.code,
-                                "line_number": exc.line_number,
-                                **(exc.details or {}),
-                            },
-                        },
-                    }
-                ),
-                422,
-            )
-        except Exception as exc:
-            app.logger.exception("Unexpected parse failure")
-            try:
-                conn = _connect_db(db_path)
-                try:
-                    _init_schema(conn)
-                    conn.execute("BEGIN")
-                    clear_variants_for_run(db_path, run_id, conn=conn, commit=False)
-                    mark_stage_failed(
-                        db_path,
-                        run_id,
-                        "parser",
-                        input_uploaded_at=uploaded_at,
-                        error_code="UNEXPECTED_ERROR",
-                        error_message="Unexpected parser failure.",
-                        error_details={"reason": str(exc)},
-                        conn=conn,
-                        commit=False,
-                    )
-                    conn.commit()
-                finally:
-                    conn.close()
-            except Exception:
-                app.logger.exception("Failed to persist unexpected parser failure state")
-            return (
-                jsonify(
-                    {
-                        "ok": False,
-                        "error": {
-                            "code": "VCF_PARSE_FAILED",
-                            "message": "Failed to parse VCF.",
-                        },
-                    }
-                ),
-                500,
-            )
-
-        cleanup = delete_run_upload_checked(db_path, run_id)
-        if not cleanup.get("ok"):
-            try:
-                conn = _connect_db(db_path)
-                try:
-                    _init_schema(conn)
-                    conn.execute("BEGIN")
-                    clear_variants_for_run(db_path, run_id, conn=conn, commit=False)
-                    mark_stage_failed(
-                        db_path,
-                        run_id,
-                        "parser",
-                        input_uploaded_at=uploaded_at,
-                        error_code="CLEANUP_FAILED",
-                        error_message="Failed to delete uploaded VCF after parsing.",
-                        error_details={"path": upload_path, **cleanup},
-                        conn=conn,
-                        commit=False,
-                    )
-                    conn.commit()
-                finally:
-                    conn.close()
-            except Exception:
-                app.logger.exception("Failed to persist cleanup failure state")
-            return (
-                jsonify(
-                    {
-                        "ok": False,
-                        "error": {
-                            "code": "VCF_CLEANUP_FAILED",
-                            "message": "Failed to delete uploaded VCF after parsing.",
-                        },
-                    }
-                ),
-                500,
-            )
-
-        return jsonify(
-            {
-                "ok": True,
-                "data": {
-                    "run_id": run_id,
-                    "parser": {"status": "succeeded", "stats": stats},
-                    "variants_sample": sample,
-                },
-            }
-        )
+        return jsonify({"ok": True, "data": {"run_id": run_id, **result}})
 
     return app
 

@@ -4,6 +4,8 @@
   const runIdEl = document.getElementById("current-run-id");
   const statusEl = document.getElementById("current-run-status");
   const referenceBuildEl = document.getElementById("current-run-reference-build");
+  const stagesEl = document.getElementById("current-run-stages");
+  const stagesMessageEl = document.getElementById("current-run-stages-message");
   const messageEl = document.getElementById("run-status-message");
 
   if (
@@ -12,6 +14,8 @@
     !runIdEl ||
     !statusEl ||
     !referenceBuildEl ||
+    !stagesEl ||
+    !stagesMessageEl ||
     !messageEl
   ) {
     return;
@@ -45,8 +49,91 @@
     if (!status) return "No run";
     if (status === "queued") return "Queued";
     if (status === "running") return "Running";
+    if (status === "succeeded") return "Succeeded";
+    if (status === "failed") return "Failed";
     if (status === "canceled") return "Canceled";
     return status;
+  }
+
+  function clearEl(el) {
+    while (el.firstChild) {
+      el.removeChild(el.firstChild);
+    }
+  }
+
+  function setStagesMessage(text) {
+    clearEl(stagesMessageEl);
+    if (!text) return;
+    const span = document.createElement("span");
+    span.textContent = text;
+    stagesMessageEl.appendChild(span);
+  }
+
+  function humanizeStageName(stageName) {
+    const normalized = String(stageName || "").replace(/_/g, " ").trim();
+    if (!normalized) return "Stage";
+    return normalized.replace(/\b\w/g, (c) => c.toUpperCase());
+  }
+
+  function formatStageStatus(status) {
+    if (!status) return "Queued";
+    if (status === "queued") return "Queued";
+    if (status === "running") return "Running";
+    if (status === "succeeded") return "Succeeded";
+    if (status === "failed") return "Failed";
+    if (status === "canceled") return "Canceled";
+    return String(status);
+  }
+
+  function stageBadgeClass(status) {
+    if (status === "running") return "text-bg-primary";
+    if (status === "succeeded") return "text-bg-success";
+    if (status === "failed") return "text-bg-danger";
+    if (status === "canceled") return "text-bg-dark";
+    return "text-bg-secondary";
+  }
+
+  function renderStages(stages) {
+    clearEl(stagesEl);
+    if (!stages || stages.length === 0) {
+      setStagesMessage("No stage status available.");
+      return;
+    }
+
+    setStagesMessage("");
+
+    for (const stage of stages) {
+      const li = document.createElement("li");
+      li.className = "list-group-item d-flex justify-content-between align-items-start";
+
+      const body = document.createElement("div");
+      body.className = "ms-2 me-auto";
+
+      const title = document.createElement("div");
+      title.className = "fw-semibold";
+      title.textContent = humanizeStageName(stage?.stage_name);
+      body.appendChild(title);
+
+      const error = stage?.error ?? null;
+      if (error?.code || error?.message) {
+        const detail = document.createElement("div");
+        detail.className = "small text-danger";
+        const parts = [];
+        if (error.code) parts.push(String(error.code));
+        if (error.message) parts.push(String(error.message));
+        detail.textContent = parts.join(": ");
+        body.appendChild(detail);
+      }
+
+      const badge = document.createElement("span");
+      const status = stage?.status ?? "queued";
+      badge.className = `badge ${stageBadgeClass(status)} rounded-pill`;
+      badge.textContent = formatStageStatus(status);
+
+      li.appendChild(body);
+      li.appendChild(badge);
+      stagesEl.appendChild(li);
+    }
   }
 
   function setRun(run) {
@@ -61,6 +148,10 @@
 
     if (status === "canceled") {
       statusEl.className = "fw-semibold text-danger";
+    } else if (status === "failed") {
+      statusEl.className = "fw-semibold text-danger";
+    } else if (status === "succeeded") {
+      statusEl.className = "fw-semibold text-success";
     } else if (status) {
       statusEl.className = "text-secondary";
     } else {
@@ -135,6 +226,31 @@
     }
   }
 
+  async function refreshStagesFromServer(runId) {
+    if (!runId) {
+      renderStages(null);
+      setStagesMessage("Create a run to see stage status.");
+      return;
+    }
+
+    try {
+      const { resp, payload } = await getJson(
+        `/api/v1/runs/${encodeURIComponent(runId)}/stages`,
+      );
+      if (resp.ok && payload?.ok && payload?.data?.run_id === runId) {
+        renderStages(payload.data.stages);
+        return;
+      }
+      if (resp.status === 404) {
+        renderStages(null);
+        setStagesMessage("No run found.");
+        return;
+      }
+    } catch {
+      setStagesMessage("Unable to load stage status right now.");
+    }
+  }
+
   newRunBtn.addEventListener("click", async () => {
     newRunBtn.disabled = true;
     setMessage(null, "");
@@ -146,6 +262,7 @@
         return;
       }
       setRun(payload.data);
+      void refreshStagesFromServer(payload.data?.run_id);
       setMessage("success", "Run created.");
     } catch {
       setMessage("error", "Failed to create run.");
@@ -169,6 +286,7 @@
         return;
       }
       setRun(payload.data);
+      void refreshStagesFromServer(payload.data?.run_id);
       setMessage("info", "Run canceled.");
     } catch {
       setMessage("error", "Failed to cancel run.");
@@ -181,8 +299,14 @@
     if (stored?.run_id) {
       setRun(stored);
       void refreshFromServer(stored.run_id);
+      void refreshStagesFromServer(stored.run_id);
+    } else {
+      renderStages(null);
+      setStagesMessage("Create a run to see stage status.");
     }
   } catch {
     // ignore storage failures
+    renderStages(null);
+    setStagesMessage("Create a run to see stage status.");
   }
 })();

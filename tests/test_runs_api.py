@@ -135,6 +135,12 @@ class RunsApiTestCase(unittest.TestCase):
             self.assertEqual(cancel_payload["data"]["status"], "canceled")
             self.assertEqual(cancel_payload["data"]["reference_build"], "GRCh38")
 
+            stages_resp = client.get(f"/api/v1/runs/{run_id}/stages")
+            self.assertEqual(stages_resp.status_code, 200)
+            stages_payload = json.loads(stages_resp.get_data(as_text=True))
+            stages = stages_payload["data"]["stages"]
+            self.assertTrue(all(stage["status"] == "canceled" for stage in stages))
+
     def test_post_cancel_unknown_run_returns_404(self):
         import sys
 
@@ -253,6 +259,86 @@ class RunsApiTestCase(unittest.TestCase):
             record = get_run(db_path, "legacy-run")
             self.assertIsNotNone(record)
             self.assertEqual(record["reference_build"], "GRCh38")
+
+    def test_get_run_stages_returns_six_queued_stages_in_order(self):
+        import sys
+
+        if SRC_DIR not in sys.path:
+            sys.path.insert(0, SRC_DIR)
+
+        import app as sp_app  # noqa: E402
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = os.path.join(tmpdir, "sp.db")
+            flask_app = sp_app.create_app({"TESTING": True, "SP_DB_PATH": db_path})
+            client = flask_app.test_client()
+
+            created_resp = client.post("/api/v1/runs")
+            run_id = json.loads(created_resp.get_data(as_text=True))["data"]["run_id"]
+
+            resp = client.get(f"/api/v1/runs/{run_id}/stages")
+            self.assertEqual(resp.status_code, 200)
+            payload = json.loads(resp.get_data(as_text=True))
+            self.assertIs(payload.get("ok"), True)
+            self.assertEqual(payload["data"]["run_id"], run_id)
+
+            stages = payload["data"]["stages"]
+            self.assertEqual(
+                [s["stage_name"] for s in stages],
+                ["parser", "pre_annotation", "classification", "prediction", "annotation", "reporting"],
+            )
+            self.assertTrue(all(s["status"] == "queued" for s in stages))
+
+    def test_get_run_stages_unknown_returns_404(self):
+        import sys
+
+        if SRC_DIR not in sys.path:
+            sys.path.insert(0, SRC_DIR)
+
+        import app as sp_app  # noqa: E402
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = os.path.join(tmpdir, "sp.db")
+            flask_app = sp_app.create_app({"TESTING": True, "SP_DB_PATH": db_path})
+            client = flask_app.test_client()
+
+            resp = client.get("/api/v1/runs/not-a-real-run-id/stages")
+            self.assertEqual(resp.status_code, 404)
+            payload = json.loads(resp.get_data(as_text=True))
+            self.assertIs(payload.get("ok"), False)
+            self.assertEqual(payload["error"]["code"], "RUN_NOT_FOUND")
+
+    def test_get_run_stages_normalizes_legacy_blocked_status_to_failed(self):
+        import sys
+
+        if SRC_DIR not in sys.path:
+            sys.path.insert(0, SRC_DIR)
+
+        import app as sp_app  # noqa: E402
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = os.path.join(tmpdir, "sp.db")
+            flask_app = sp_app.create_app({"TESTING": True, "SP_DB_PATH": db_path})
+            client = flask_app.test_client()
+
+            created_resp = client.post("/api/v1/runs")
+            run_id = json.loads(created_resp.get_data(as_text=True))["data"]["run_id"]
+
+            conn = sqlite3.connect(db_path)
+            try:
+                conn.execute(
+                    "UPDATE run_stages SET status = 'blocked' WHERE run_id = ? AND stage_name = ?",
+                    (run_id, "parser"),
+                )
+                conn.commit()
+            finally:
+                conn.close()
+
+            resp = client.get(f"/api/v1/runs/{run_id}/stages")
+            self.assertEqual(resp.status_code, 200)
+            payload = json.loads(resp.get_data(as_text=True))
+            parser_stage = [s for s in payload["data"]["stages"] if s["stage_name"] == "parser"][0]
+            self.assertEqual(parser_stage["status"], "failed")
 
 
 if __name__ == "__main__":
