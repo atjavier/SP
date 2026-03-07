@@ -73,6 +73,43 @@ def create_app(config_overrides: dict[str, Any] | None = None) -> Flask:
             )
         return jsonify({"ok": True, "data": record})
 
+    @app.get("/api/v1/runs/<run_id>")
+    def get_run(run_id: str):
+        from storage.runs import get_run as get_run_record
+
+        try:
+            record = get_run_record(app.config["SP_DB_PATH"], run_id)
+        except Exception:
+            app.logger.exception("Failed to fetch run record")
+            return (
+                jsonify(
+                    {
+                        "ok": False,
+                        "error": {
+                            "code": "RUN_FETCH_FAILED",
+                            "message": "Failed to fetch run record.",
+                        },
+                    }
+                ),
+                500,
+            )
+
+        if not record:
+            return (
+                jsonify(
+                    {
+                        "ok": False,
+                        "error": {
+                            "code": "RUN_NOT_FOUND",
+                            "message": "Run not found.",
+                        },
+                    }
+                ),
+                404,
+            )
+
+        return jsonify({"ok": True, "data": record})
+
     @app.post("/api/v1/runs/<run_id>/cancel")
     def cancel_run(run_id: str):
         from storage.runs import (

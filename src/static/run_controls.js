@@ -3,9 +3,17 @@
   const cancelRunBtn = document.getElementById("cancel-run-btn");
   const runIdEl = document.getElementById("current-run-id");
   const statusEl = document.getElementById("current-run-status");
+  const referenceBuildEl = document.getElementById("current-run-reference-build");
   const messageEl = document.getElementById("run-status-message");
 
-  if (!newRunBtn || !cancelRunBtn || !runIdEl || !statusEl || !messageEl) {
+  if (
+    !newRunBtn ||
+    !cancelRunBtn ||
+    !runIdEl ||
+    !statusEl ||
+    !referenceBuildEl ||
+    !messageEl
+  ) {
     return;
   }
 
@@ -48,6 +56,9 @@
     const status = run?.status ?? null;
     statusEl.textContent = formatStatus(status);
 
+    const referenceBuild = run?.reference_build ?? null;
+    referenceBuildEl.textContent = referenceBuild ?? "\u2014";
+
     if (status === "canceled") {
       statusEl.className = "fw-semibold text-danger";
     } else if (status) {
@@ -66,6 +77,7 @@
             run_id: currentRunId,
             status,
             created_at: run?.created_at ?? null,
+            reference_build: referenceBuild,
           }),
         );
       } else {
@@ -89,6 +101,38 @@
       payload = null;
     }
     return { resp, payload };
+  }
+
+  async function getJson(url) {
+    const resp = await fetch(url, {
+      method: "GET",
+      headers: { Accept: "application/json" },
+    });
+    const text = await resp.text();
+    let payload = null;
+    try {
+      payload = JSON.parse(text);
+    } catch {
+      payload = null;
+    }
+    return { resp, payload };
+  }
+
+  async function refreshFromServer(runId) {
+    try {
+      const { resp, payload } = await getJson(
+        `/api/v1/runs/${encodeURIComponent(runId)}`,
+      );
+      if (resp.ok && payload?.ok && payload?.data?.run_id === runId) {
+        setRun(payload.data);
+        return;
+      }
+      if (resp.status === 404) {
+        setRun(null);
+      }
+    } catch {
+      // ignore refresh failures
+    }
   }
 
   newRunBtn.addEventListener("click", async () => {
@@ -136,6 +180,7 @@
     const stored = JSON.parse(localStorage.getItem(STORAGE_KEY));
     if (stored?.run_id) {
       setRun(stored);
+      void refreshFromServer(stored.run_id);
     }
   } catch {
     // ignore storage failures

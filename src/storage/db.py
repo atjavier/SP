@@ -9,7 +9,8 @@ SCHEMA_STATEMENTS: tuple[str, ...] = (
     CREATE TABLE IF NOT EXISTS runs (
       run_id TEXT PRIMARY KEY,
       status TEXT NOT NULL,
-      created_at TEXT NOT NULL
+      created_at TEXT NOT NULL,
+      reference_build TEXT NOT NULL DEFAULT 'GRCh38'
     );
     """,
     """
@@ -85,5 +86,19 @@ def init_schema(conn: sqlite3.Connection) -> None:
     was_in_transaction = conn.in_transaction
     for statement in SCHEMA_STATEMENTS:
         conn.execute(statement)
+    _apply_schema_migrations(conn)
     if not was_in_transaction:
         conn.commit()
+
+
+def _apply_schema_migrations(conn: sqlite3.Connection) -> None:
+    _ensure_runs_reference_build_column(conn)
+
+
+def _ensure_runs_reference_build_column(conn: sqlite3.Connection) -> None:
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(runs);").fetchall()}
+    if "reference_build" in columns:
+        return
+    conn.execute(
+        "ALTER TABLE runs ADD COLUMN reference_build TEXT NOT NULL DEFAULT 'GRCh38';"
+    )
