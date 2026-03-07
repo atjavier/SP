@@ -28,6 +28,8 @@ Environment variables (optional):
   - Use `0.0.0.0` to listen on your LAN (only if you trust the network).
 - `SP_PORT` (default: `8000`)
 - `SP_DB_PATH` (default: `<repo_root>\\instance\\sp.db`)
+- `SP_MAX_UPLOAD_BYTES` (default: `52428800` / 50 MiB)
+- `SP_MAX_VCF_DECOMPRESSED_BYTES` (default: `262144000` / 250 MiB; safety cap during parse)
 - `SECRET_KEY` (recommended for stable sessions across restarts)
 
 Notes:

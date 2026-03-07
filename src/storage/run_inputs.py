@@ -118,3 +118,67 @@ def get_run_input(db_path: str, run_id: str) -> dict | None:
         "uploaded_at": row[2],
         "validation": {"ok": bool(row[3]), "errors": errors, "warnings": warnings},
     }
+
+
+def get_run_upload_path(db_path: str, run_id: str) -> str | None:
+    record = get_run_input(db_path, run_id)
+    if not record:
+        return None
+    return os.path.join(_run_upload_dir(db_path, run_id), record["stored_filename"])
+
+
+def delete_run_upload(db_path: str, run_id: str) -> None:
+    stored_path = get_run_upload_path(db_path, run_id)
+    if not stored_path:
+        return
+
+    upload_dir = os.path.dirname(stored_path)
+
+    try:
+        if os.path.exists(stored_path):
+            os.remove(stored_path)
+    except OSError:
+        pass
+
+
+def delete_run_upload_checked(db_path: str, run_id: str) -> dict:
+    stored_path = get_run_upload_path(db_path, run_id)
+    if not stored_path:
+        return {"ok": True, "deleted": False, "reason": "NO_UPLOAD"}
+
+    upload_dir = os.path.dirname(stored_path)
+    errors: list[str] = []
+    removed: list[str] = []
+
+    if os.path.isdir(upload_dir):
+        for entry in os.listdir(upload_dir):
+            path = os.path.join(upload_dir, entry)
+            try:
+                if os.path.isfile(path):
+                    os.remove(path)
+                    removed.append(entry)
+            except OSError as exc:
+                errors.append(str(exc))
+
+    try:
+        if os.path.isdir(upload_dir) and not os.listdir(upload_dir):
+            os.rmdir(upload_dir)
+    except OSError as exc:
+        errors.append(str(exc))
+
+    remaining: list[str] = []
+    try:
+        if os.path.isdir(upload_dir):
+            remaining = list(os.listdir(upload_dir))
+    except OSError:
+        remaining = []
+
+    ok = not remaining and not errors
+    return {
+        "ok": ok,
+        "deleted": ok,
+        "path": stored_path,
+        "removed": removed,
+        "remaining": remaining,
+        "errors": errors,
+    }
