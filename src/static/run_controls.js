@@ -1,5 +1,6 @@
 (() => {
   const newRunBtn = document.getElementById("new-run-btn");
+  const retryFailedStageBtn = document.getElementById("retry-failed-stage-btn");
   const cancelRunBtn = document.getElementById("cancel-run-btn");
   const runIdEl = document.getElementById("current-run-id");
   const statusEl = document.getElementById("current-run-status");
@@ -7,6 +8,7 @@
   const stagesEl = document.getElementById("current-run-stages");
   const stagesMessageEl = document.getElementById("current-run-stages-message");
   const messageEl = document.getElementById("run-status-message");
+  const liveUpdatesEl = document.getElementById("live-updates-indicator");
 
   if (
     !newRunBtn ||
@@ -16,13 +18,26 @@
     !referenceBuildEl ||
     !stagesEl ||
     !stagesMessageEl ||
-    !messageEl
+    !messageEl ||
+    !liveUpdatesEl
   ) {
     return;
   }
 
   const STORAGE_KEY = "sp_current_run";
+  const PIPELINE_STAGE_ORDER = [
+    "parser",
+    "pre_annotation",
+    "classification",
+    "prediction",
+    "annotation",
+    "reporting",
+  ];
   let currentRunId = null;
+  let currentRunStatus = null;
+  let lastStagesSnapshot = null;
+  let eventSource = null;
+  let elapsedTimerId = null;
 
   function clearMessage() {
     while (messageEl.firstChild) {
@@ -93,47 +108,320 @@
     return "text-bg-secondary";
   }
 
-  function renderStages(stages) {
-    clearEl(stagesEl);
-    if (!stages || stages.length === 0) {
-      setStagesMessage("No stage status available.");
+  function parseIsoDate(iso) {
+    if (!iso) return null;
+    const d = new Date(iso);
+    if (Number.isNaN(d.getTime())) return null;
+    return d;
+  }
+
+  function formatElapsed(ms) {
+    if (ms == null || !Number.isFinite(ms) || ms < 0) return "\u2014";
+    const totalSeconds = Math.floor(ms / 1000);
+    const seconds = totalSeconds % 60;
+    const minutes = Math.floor(totalSeconds / 60) % 60;
+    const hours = Math.floor(totalSeconds / 3600);
+    if (hours > 0) return `${hours}h ${minutes}m ${seconds}s`;
+    if (minutes > 0) return `${minutes}m ${seconds}s`;
+    return `${seconds}s`;
+  }
+
+  function stopElapsedTimer() {
+    if (elapsedTimerId == null) return;
+    window.clearInterval(elapsedTimerId);
+    elapsedTimerId = null;
+  }
+
+  function ensureStageRow(stageName) {
+    for (const li of stagesEl.querySelectorAll("li[data-stage-name]")) {
+      if (li.dataset.stageName === stageName) return li;
+    }
+
+    const li = document.createElement("li");
+    li.className = "list-group-item d-flex justify-content-between align-items-start";
+    li.dataset.stageName = stageName;
+
+    const body = document.createElement("div");
+    body.className = "ms-2 me-auto";
+
+    const title = document.createElement("div");
+    title.className = "fw-semibold";
+    title.dataset.role = "stage-title";
+    body.appendChild(title);
+
+    const detail = document.createElement("div");
+    detail.className = "small text-danger";
+    detail.dataset.role = "stage-error";
+    body.appendChild(detail);
+
+    const timing = document.createElement("div");
+    timing.className = "small text-secondary mt-1";
+    timing.dataset.role = "stage-timing";
+
+    timing.appendChild(document.createTextNode("Started: "));
+    const startedCode = document.createElement("code");
+    startedCode.dataset.role = "stage-started-at";
+    startedCode.textContent = "\u2014";
+    timing.appendChild(startedCode);
+
+    timing.appendChild(document.createTextNode(" Completed: "));
+    const completedCode = document.createElement("code");
+    completedCode.dataset.role = "stage-completed-at";
+    completedCode.textContent = "\u2014";
+    timing.appendChild(completedCode);
+
+    timing.appendChild(document.createTextNode(" Elapsed: "));
+    const elapsedSpan = document.createElement("span");
+    elapsedSpan.dataset.role = "stage-elapsed";
+    elapsedSpan.textContent = "\u2014";
+    timing.appendChild(elapsedSpan);
+    body.appendChild(timing);
+
+    const badge = document.createElement("span");
+    badge.className = "badge text-bg-secondary rounded-pill";
+    badge.dataset.role = "stage-badge";
+
+    li.appendChild(body);
+    li.appendChild(badge);
+    stagesEl.appendChild(li);
+    return li;
+  }
+
+  function updateElapsedForRow(li) {
+    const startedAt = li.dataset.startedAt || null;
+    const completedAt = li.dataset.completedAt || null;
+    const status = li.dataset.stageStatus || "queued";
+
+    const started = parseIsoDate(startedAt);
+    const completed = parseIsoDate(completedAt);
+
+    let elapsedMs = null;
+    if (started && completed) {
+      elapsedMs = completed.getTime() - started.getTime();
+    } else if (started && status === "running") {
+      elapsedMs = Date.now() - started.getTime();
+    }
+
+    const elapsedEl = li.querySelector('[data-role="stage-elapsed"]');
+    if (elapsedEl) elapsedEl.textContent = formatElapsed(elapsedMs);
+  }
+
+  function updateAllElapsed() {
+    for (const li of stagesEl.querySelectorAll("li[data-stage-name]")) {
+      updateElapsedForRow(li);
+    }
+  }
+
+  function ensureElapsedTimer() {
+    if (elapsedTimerId != null) return;
+    elapsedTimerId = window.setInterval(() => {
+      updateAllElapsed();
+    }, 1000);
+  }
+
+  function firstFailedStageName(stages) {
+    if (!stages || stages.length === 0) return null;
+    const byName = new Map();
+    for (const stage of stages) {
+      const name = String(stage?.stage_name || "");
+      if (name) byName.set(name, stage);
+    }
+
+    for (const stageName of PIPELINE_STAGE_ORDER) {
+      const stage = byName.get(stageName);
+      if (stage?.status === "failed") return stageName;
+    }
+
+    for (const stage of stages) {
+      if (stage?.status === "failed" && stage?.stage_name) {
+        return String(stage.stage_name);
+      }
+    }
+
+    return null;
+  }
+
+  function updateRetryControl(stages) {
+    if (!retryFailedStageBtn) return;
+
+    const failedStage = firstFailedStageName(stages);
+    const anyRunning =
+      Array.isArray(stages) && stages.some((s) => (s?.status ?? null) === "running");
+
+    if (
+      !currentRunId ||
+      !failedStage ||
+      anyRunning ||
+      currentRunStatus === "canceled" ||
+      currentRunStatus === "running"
+    ) {
+      retryFailedStageBtn.hidden = true;
+      retryFailedStageBtn.disabled = true;
+      retryFailedStageBtn.dataset.stageName = "";
       return;
     }
 
+    retryFailedStageBtn.hidden = false;
+    retryFailedStageBtn.disabled = false;
+    retryFailedStageBtn.dataset.stageName = failedStage;
+  }
+
+  function renderStages(stages) {
+    if (!stages || stages.length === 0) {
+      lastStagesSnapshot = null;
+      clearEl(stagesEl);
+      stopElapsedTimer();
+      setStagesMessage("No stage status available.");
+      updateRetryControl(null);
+      return;
+    }
+
+    lastStagesSnapshot = stages;
     setStagesMessage("");
+    const snapshotStageNames = new Set(
+      stages.map((s) => String(s?.stage_name || "")).filter((name) => Boolean(name)),
+    );
+    for (const li of stagesEl.querySelectorAll("li[data-stage-name]")) {
+      if (!snapshotStageNames.has(li.dataset.stageName)) {
+        li.remove();
+      }
+    }
 
+    let anyRunningForElapsed = false;
     for (const stage of stages) {
-      const li = document.createElement("li");
-      li.className = "list-group-item d-flex justify-content-between align-items-start";
+      const stageName = String(stage?.stage_name || "");
+      if (!stageName) continue;
 
-      const body = document.createElement("div");
-      body.className = "ms-2 me-auto";
+      const li = ensureStageRow(stageName);
+      stagesEl.appendChild(li);
 
-      const title = document.createElement("div");
-      title.className = "fw-semibold";
-      title.textContent = humanizeStageName(stage?.stage_name);
-      body.appendChild(title);
+      const titleEl = li.querySelector('[data-role="stage-title"]');
+      if (titleEl) titleEl.textContent = humanizeStageName(stageName);
 
       const error = stage?.error ?? null;
-      if (error?.code || error?.message) {
-        const detail = document.createElement("div");
-        detail.className = "small text-danger";
-        const parts = [];
-        if (error.code) parts.push(String(error.code));
-        if (error.message) parts.push(String(error.message));
-        detail.textContent = parts.join(": ");
-        body.appendChild(detail);
+      const errorEl = li.querySelector('[data-role="stage-error"]');
+      if (errorEl) {
+        if (error?.code || error?.message) {
+          const parts = [];
+          if (error.code) parts.push(String(error.code));
+          if (error.message) parts.push(String(error.message));
+          errorEl.textContent = parts.join(": ");
+          errorEl.style.display = "";
+        } else {
+          errorEl.textContent = "";
+          errorEl.style.display = "none";
+        }
       }
 
-      const badge = document.createElement("span");
       const status = stage?.status ?? "queued";
-      badge.className = `badge ${stageBadgeClass(status)} rounded-pill`;
-      badge.textContent = formatStageStatus(status);
+      li.dataset.stageStatus = status;
+      li.dataset.startedAt = stage?.started_at ?? "";
+      li.dataset.completedAt = stage?.completed_at ?? "";
 
-      li.appendChild(body);
-      li.appendChild(badge);
-      stagesEl.appendChild(li);
+      if (status === "running" && li.dataset.startedAt && !li.dataset.completedAt) {
+        anyRunningForElapsed = true;
+      }
+
+      const startedEl = li.querySelector('[data-role="stage-started-at"]');
+      if (startedEl) startedEl.textContent = stage?.started_at ?? "\u2014";
+      const completedEl = li.querySelector('[data-role="stage-completed-at"]');
+      if (completedEl) completedEl.textContent = stage?.completed_at ?? "\u2014";
+
+      const badgeEl = li.querySelector('[data-role="stage-badge"]');
+      if (badgeEl) {
+        badgeEl.className = `badge ${stageBadgeClass(status)} rounded-pill`;
+        badgeEl.textContent = formatStageStatus(status);
+      }
+
+      updateElapsedForRow(li);
     }
+
+    if (anyRunningForElapsed) {
+      ensureElapsedTimer();
+    } else {
+      stopElapsedTimer();
+    }
+
+    updateRetryControl(stages);
+  }
+
+  function setLiveUpdates(kind, text) {
+    clearEl(liveUpdatesEl);
+    const span = document.createElement("span");
+    span.className =
+      kind === "error"
+        ? "text-danger"
+        : kind === "warning"
+          ? "text-warning"
+          : kind === "success"
+            ? "text-success"
+            : "text-secondary";
+    span.textContent = text || "Not connected.";
+    liveUpdatesEl.appendChild(span);
+  }
+
+  function closeEventSource() {
+    if (eventSource) {
+      try {
+        eventSource.close();
+      } catch {
+        // ignore
+      }
+      eventSource = null;
+    }
+  }
+
+  async function reconcileAfterReconnect(runId) {
+    await refreshFromServer(runId);
+    await refreshStagesFromServer(runId);
+  }
+
+  function ensureEventSource(runId) {
+    if (!runId) {
+      closeEventSource();
+      setLiveUpdates(null, "Not connected.");
+      return;
+    }
+
+    if (eventSource && eventSource.__runId === runId) return;
+
+    closeEventSource();
+    setLiveUpdates("warning", "Live updates: connecting...");
+
+    const url = `/api/v1/runs/${encodeURIComponent(runId)}/events`;
+    eventSource = new EventSource(url);
+    eventSource.__runId = runId;
+
+    eventSource.onopen = () => {
+      setLiveUpdates("success", "Live updates: connected.");
+      void reconcileAfterReconnect(runId);
+    };
+
+    eventSource.onerror = () => {
+      setLiveUpdates("warning", "Live updates paused. Reconnecting...");
+    };
+
+    eventSource.addEventListener("run_status", (ev) => {
+      try {
+        const parsed = JSON.parse(ev.data);
+        if (parsed?.run_id !== runId) return;
+        const status = parsed?.data?.status ?? null;
+        setRun({ run_id: runId, status, reference_build: referenceBuildEl.textContent });
+      } catch {
+        // ignore invalid events
+      }
+    });
+
+    eventSource.addEventListener("stage_status", (ev) => {
+      try {
+        const parsed = JSON.parse(ev.data);
+        if (parsed?.run_id !== runId) return;
+        // simplest and safest: refetch ordered stages snapshot
+        void refreshStagesFromServer(runId);
+      } catch {
+        // ignore invalid events
+      }
+    });
   }
 
   function setRun(run) {
@@ -141,6 +429,7 @@
     runIdEl.textContent = currentRunId ?? "\u2014";
 
     const status = run?.status ?? null;
+    currentRunStatus = status;
     statusEl.textContent = formatStatus(status);
 
     const referenceBuild = run?.reference_build ?? null;
@@ -159,6 +448,8 @@
     }
 
     cancelRunBtn.disabled = !currentRunId || status === "canceled";
+    updateRetryControl(lastStagesSnapshot);
+    ensureEventSource(currentRunId);
 
     try {
       if (currentRunId) {
@@ -271,6 +562,48 @@
     }
   });
 
+  if (retryFailedStageBtn) {
+    retryFailedStageBtn.addEventListener("click", async () => {
+      if (!currentRunId) return;
+      const stageName = String(retryFailedStageBtn.dataset.stageName || "").trim();
+      if (!stageName) return;
+
+      retryFailedStageBtn.disabled = true;
+      setMessage(null, "");
+      try {
+        const { resp, payload } = await postJson(
+          `/api/v1/runs/${encodeURIComponent(currentRunId)}/stages/${encodeURIComponent(stageName)}/retry`,
+        );
+        if (!resp.ok || !payload?.ok) {
+          const msg = payload?.error?.message ?? "Failed to retry stage.";
+          setMessage("error", msg);
+          return;
+        }
+
+        const preserved = Array.isArray(payload?.data?.preserved_stages)
+          ? payload.data.preserved_stages
+          : [];
+        const reset = Array.isArray(payload?.data?.reset_stages) ? payload.data.reset_stages : [];
+
+        const preservedText =
+          preserved.length > 0 ? preserved.map(humanizeStageName).join(", ") : "None";
+        const resetText = reset.length > 0 ? reset.map(humanizeStageName).join(", ") : "None";
+
+        setMessage(
+          "info",
+          `Retrying from ${humanizeStageName(stageName)}. Preserved: ${preservedText}. Re-running: ${resetText}.`,
+        );
+
+        void refreshFromServer(currentRunId);
+        void refreshStagesFromServer(currentRunId);
+      } catch {
+        setMessage("error", "Failed to retry stage.");
+      } finally {
+        retryFailedStageBtn.disabled = false;
+      }
+    });
+  }
+
   cancelRunBtn.addEventListener("click", async () => {
     if (!currentRunId) return;
     cancelRunBtn.disabled = true;
@@ -303,10 +636,12 @@
     } else {
       renderStages(null);
       setStagesMessage("Create a run to see stage status.");
+      setLiveUpdates(null, "");
     }
   } catch {
     // ignore storage failures
     renderStages(null);
     setStagesMessage("Create a run to see stage status.");
+    setLiveUpdates(null, "");
   }
 })();

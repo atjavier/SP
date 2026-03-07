@@ -6,6 +6,7 @@ import sys
 import tempfile
 import time
 import unittest
+from datetime import datetime
 from unittest.mock import patch
 
 
@@ -74,6 +75,17 @@ class OrchestratorApiTestCase(unittest.TestCase):
             stages = self._wait_for_all_stages_succeeded(client, run_id)
             by_name = {stage["stage_name"]: stage for stage in stages}
             self.assertEqual(by_name["prediction"]["stats"]["stub"], True)
+
+            for stage in stages:
+                self.assertEqual(stage["status"], "succeeded")
+                self.assertIsInstance(stage.get("started_at"), str)
+                self.assertIsInstance(stage.get("completed_at"), str)
+
+                started = datetime.fromisoformat(stage["started_at"])
+                completed = datetime.fromisoformat(stage["completed_at"])
+                self.assertIsNotNone(started.tzinfo)
+                self.assertIsNotNone(completed.tzinfo)
+                self.assertGreaterEqual(completed, started)
 
             status = self._wait_for_run_not_running(client, run_id)
             self.assertEqual(status, "queued")

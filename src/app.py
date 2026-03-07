@@ -1,9 +1,10 @@
 import os
 import secrets
 import threading
+import time
 from typing import Any
 
-from flask import Flask, jsonify, render_template, request
+from flask import Flask, Response, jsonify, render_template, request, stream_with_context
 from werkzeug.exceptions import RequestEntityTooLarge
 
 
@@ -168,6 +169,125 @@ def create_app(config_overrides: dict[str, Any] | None = None) -> Flask:
 
         return jsonify({"ok": True, "data": {"run_id": run_id, "stages": stages}})
 
+    @app.get("/api/v1/runs/<run_id>/events")
+    def stream_run_events(run_id: str):
+        from sse import SseEnvelope, format_sse_comment, format_sse_event, format_sse_retry, now_iso8601
+        from storage.runs import get_run as get_run_record
+        from storage.stages import PIPELINE_STAGE_ORDER, list_pipeline_stages
+
+        db_path = app.config["SP_DB_PATH"]
+
+        try:
+            run = get_run_record(db_path, run_id)
+        except Exception:
+            app.logger.exception("Failed to fetch run for SSE stream")
+            return (
+                jsonify(
+                    {
+                        "ok": False,
+                        "error": {"code": "RUN_FETCH_FAILED", "message": "Failed to fetch run record."},
+                    }
+                ),
+                500,
+            )
+
+        if not run:
+            return (
+                jsonify({"ok": False, "error": {"code": "RUN_NOT_FOUND", "message": "Run not found."}}),
+                404,
+            )
+
+        def _snapshot_events() -> tuple[list[str], dict[str, str]]:
+            event_at = now_iso8601()
+            run_payload = SseEnvelope(
+                run_id=run_id,
+                event_at=event_at,
+                data={"status": run.get("status")},
+            ).to_dict()
+            messages: list[str] = [format_sse_event("run_status", run_payload)]
+
+            stages = list_pipeline_stages(db_path, run_id)
+            by_name = {s.get("stage_name"): s for s in stages}
+            stage_status_by_name: dict[str, str] = {}
+            for stage_name in PIPELINE_STAGE_ORDER:
+                stage = by_name.get(stage_name) or {"stage_name": stage_name, "status": "queued"}
+                stage_status_by_name[stage_name] = stage.get("status") or "queued"
+                stage_payload = SseEnvelope(
+                    run_id=run_id,
+                    event_at=event_at,
+                    data=stage,
+                ).to_dict()
+                messages.append(format_sse_event("stage_status", stage_payload))
+
+            return messages, stage_status_by_name
+
+        def _event_stream():
+            import sqlite3
+
+            yield format_sse_retry(2000)
+            snapshot_messages, stage_status_by_name = _snapshot_events()
+            for msg in snapshot_messages:
+                yield msg
+
+            last_run_status = run.get("status")
+            last_stage_status_by_name: dict[str, str] = dict(stage_status_by_name)
+            last_heartbeat_at = time.time()
+
+            poll_seconds = 0.5
+            heartbeat_seconds = 15.0
+
+            while True:
+                try:
+                    current_run = get_run_record(db_path, run_id)
+                    if not current_run:
+                        return
+
+                    current_status = current_run.get("status")
+                    if current_status != last_run_status:
+                        last_run_status = current_status
+                        payload = SseEnvelope(
+                            run_id=run_id,
+                            event_at=now_iso8601(),
+                            data={"status": current_status},
+                        ).to_dict()
+                        yield format_sse_event("run_status", payload)
+
+                    stages = list_pipeline_stages(db_path, run_id)
+                    for stage in stages:
+                        name = stage.get("stage_name")
+                        if not name:
+                            continue
+                        status = stage.get("status") or "queued"
+                        if last_stage_status_by_name.get(name) != status:
+                            last_stage_status_by_name[name] = status
+                            payload = SseEnvelope(
+                                run_id=run_id,
+                                event_at=now_iso8601(),
+                                data=stage,
+                            ).to_dict()
+                            yield format_sse_event("stage_status", payload)
+
+                    now = time.time()
+                    if now - last_heartbeat_at >= heartbeat_seconds:
+                        last_heartbeat_at = now
+                        yield format_sse_comment("ping")
+
+                    time.sleep(poll_seconds)
+                except GeneratorExit:
+                    return
+                except sqlite3.OperationalError as exc:
+                    if "locked" in str(exc).lower():
+                        time.sleep(min(0.25, poll_seconds))
+                        continue
+                    app.logger.exception("SSE stream sqlite error for run_id=%s", run_id)
+                    return
+                except Exception:
+                    app.logger.exception("SSE stream failed for run_id=%s", run_id)
+                    return
+
+        headers = {"Cache-Control": "no-cache", "X-Accel-Buffering": "no"}
+        return Response(stream_with_context(_event_stream()), mimetype="text/event-stream", headers=headers)
+
     @app.post("/api/v1/runs/<run_id>/start")
     def start_run(run_id: str):
         from pipeline.orchestrator import OrchestratorError, prepare_pipeline_start, run_pipeline
@@ -281,6 +401,293 @@ def create_app(config_overrides: dict[str, Any] | None = None) -> Flask:
 
         return jsonify(
             {"ok": True, "data": {"run_id": run_id, "status": "running", "started_stage": started_stage}}
+        )
+
+    @app.post("/api/v1/runs/<run_id>/stages/<stage_name>/retry")
+    def retry_stage(run_id: str, stage_name: str):
+        from pipeline.orchestrator import OrchestratorError, prepare_pipeline_start, run_pipeline
+        from storage.run_inputs import get_run_input
+        from storage.runs import (
+            AnotherRunRunningError,
+            RunAlreadyRunningError,
+            RunNotFoundError,
+            RunNotStartableError,
+            claim_run_for_execution,
+            get_run as get_run_record,
+            set_run_status_if_not_canceled,
+        )
+        from storage.stages import (
+            PIPELINE_STAGE_ORDER,
+            StageResetRunCanceledError,
+            list_pipeline_stages,
+            reset_stage_and_downstream,
+        )
+
+        db_path = app.config["SP_DB_PATH"]
+        normalized_stage = (stage_name or "").strip()
+
+        if normalized_stage not in PIPELINE_STAGE_ORDER:
+            return (
+                jsonify(
+                    {
+                        "ok": False,
+                        "error": {
+                            "code": "STAGE_NOT_FOUND",
+                            "message": "Stage not found.",
+                            "details": {"stage_name": stage_name},
+                        },
+                    }
+                ),
+                404,
+            )
+
+        run = get_run_record(db_path, run_id)
+        if not run:
+            return (
+                jsonify({"ok": False, "error": {"code": "RUN_NOT_FOUND", "message": "Run not found."}}),
+                404,
+            )
+
+        if run.get("status") == "canceled":
+            return (
+                jsonify(
+                    {
+                        "ok": False,
+                        "error": {"code": "RUN_CANCELED", "message": "Run is canceled and cannot be retried."},
+                    }
+                ),
+                409,
+            )
+
+        stages = list_pipeline_stages(db_path, run_id)
+        by_name = {stage.get("stage_name"): stage for stage in stages if stage.get("stage_name")}
+        current_stage = by_name.get(normalized_stage) or {}
+        current_status = current_stage.get("status") or "queued"
+
+        if current_status != "failed":
+            return (
+                jsonify(
+                    {
+                        "ok": False,
+                        "error": {
+                            "code": "STAGE_NOT_FAILED",
+                            "message": "Stage is not failed.",
+                            "details": {"stage_name": normalized_stage, "current_status": current_status},
+                        },
+                    }
+                ),
+                409,
+            )
+
+        run_input = get_run_input(db_path, run_id)
+        if not run_input:
+            return (
+                jsonify(
+                    {"ok": False, "error": {"code": "VCF_NOT_UPLOADED", "message": "No VCF uploaded for this run."}}
+                ),
+                409,
+            )
+        if not run_input.get("validation", {}).get("ok"):
+            return (
+                jsonify(
+                    {
+                        "ok": False,
+                        "error": {
+                            "code": "VCF_NOT_VALIDATED",
+                            "message": "Uploaded VCF is not valid; fix validation errors before retrying.",
+                        },
+                    }
+                ),
+                409,
+            )
+
+        uploaded_at = run_input.get("uploaded_at")
+        stage_uploaded_at = current_stage.get("input_uploaded_at")
+        if stage_uploaded_at and uploaded_at and stage_uploaded_at != uploaded_at:
+            return (
+                jsonify(
+                    {
+                        "ok": False,
+                        "error": {
+                            "code": "STAGE_INPUT_MISMATCH",
+                            "message": "Failed stage does not match the latest uploaded input; restart from an earlier stage.",
+                            "details": {
+                                "stage_name": normalized_stage,
+                                "stage_input_uploaded_at": stage_uploaded_at,
+                                "uploaded_at": uploaded_at,
+                            },
+                        },
+                    }
+                ),
+                409,
+            )
+
+        try:
+            claim_run_for_execution(db_path, run_id)
+        except AnotherRunRunningError as exc:
+            return (
+                jsonify(
+                    {
+                        "ok": False,
+                        "error": {
+                            "code": "ANOTHER_RUN_RUNNING",
+                            "message": "Another run is currently running.",
+                            "details": {"running_run_id": exc.running_run_id},
+                        },
+                    }
+                ),
+                409,
+            )
+        except RunAlreadyRunningError:
+            return (
+                jsonify(
+                    {
+                        "ok": False,
+                        "error": {"code": "RUN_ALREADY_RUNNING", "message": "Run is already running."},
+                    }
+                ),
+                409,
+            )
+        except RunNotStartableError:
+            return (
+                jsonify(
+                    {
+                        "ok": False,
+                        "error": {"code": "RUN_CANCELED", "message": "Run is canceled and cannot be retried."},
+                    }
+                ),
+                409,
+            )
+        except RunNotFoundError:
+            return (
+                jsonify({"ok": False, "error": {"code": "RUN_NOT_FOUND", "message": "Run not found."}}),
+                404,
+            )
+        except Exception:
+            app.logger.exception("Failed to claim run for retry")
+            return (
+                jsonify(
+                    {
+                        "ok": False,
+                        "error": {"code": "RUN_START_FAILED", "message": "Failed to start retry."},
+                    }
+                ),
+                500,
+            )
+
+        try:
+            reset_stage_and_downstream(db_path, run_id, normalized_stage)
+        except StageResetRunCanceledError:
+            return (
+                jsonify(
+                    {
+                        "ok": False,
+                        "error": {"code": "RUN_CANCELED", "message": "Run is canceled and cannot be retried."},
+                    }
+                ),
+                409,
+            )
+        except Exception:
+            app.logger.exception("Failed to reset stages for retry (run_id=%s stage=%s)", run_id, normalized_stage)
+            try:
+                set_run_status_if_not_canceled(db_path, run_id, "queued")
+            except Exception:
+                app.logger.exception("Failed to reset run status after retry reset failure (run_id=%s)", run_id)
+            return (
+                jsonify(
+                    {
+                        "ok": False,
+                        "error": {
+                            "code": "STAGE_RESET_FAILED",
+                            "message": "Failed to reset stages for retry.",
+                        },
+                    }
+                ),
+                500,
+            )
+
+        start_index = PIPELINE_STAGE_ORDER.index(normalized_stage)
+        reset_stages = list(PIPELINE_STAGE_ORDER[start_index:])
+        preserved_stages: list[str] = []
+        stages_after = list_pipeline_stages(db_path, run_id)
+        by_name_after = {
+            stage.get("stage_name"): stage for stage in stages_after if stage.get("stage_name")
+        }
+        for name in PIPELINE_STAGE_ORDER[:start_index]:
+            stage = by_name_after.get(name) or {}
+            if stage.get("status") == "succeeded" and stage.get("input_uploaded_at") == uploaded_at:
+                preserved_stages.append(name)
+
+        try:
+            prepared = prepare_pipeline_start(db_path, run_id)
+        except OrchestratorError as exc:
+            try:
+                set_run_status_if_not_canceled(db_path, run_id, "queued")
+            except Exception:
+                app.logger.exception("Failed to reset run status after retry prepare failure (run_id=%s)", run_id)
+            error: dict[str, Any] = {"code": exc.code, "message": exc.message}
+            if exc.details:
+                error["details"] = exc.details
+            return jsonify({"ok": False, "error": error}), exc.http_status
+
+        started_stage = prepared.get("started_stage")
+        if started_stage is None:
+            try:
+                set_run_status_if_not_canceled(db_path, run_id, "queued")
+            except Exception:
+                app.logger.exception("Failed to reset run status after no-op retry (run_id=%s)", run_id)
+            return jsonify(
+                {
+                    "ok": True,
+                    "data": {
+                        "run_id": run_id,
+                        "stage_name": normalized_stage,
+                        "preserved_stages": preserved_stages,
+                        "reset_stages": reset_stages,
+                        "status": run.get("status"),
+                        "started_stage": None,
+                    },
+                }
+            )
+
+        def _background_execute():
+            try:
+                run_pipeline(
+                    db_path,
+                    run_id,
+                    max_decompressed_bytes=app.config["SP_MAX_VCF_DECOMPRESSED_BYTES"],
+                    logger=app.logger,
+                )
+            except OrchestratorError as exc:
+                app.logger.warning(
+                    "Pipeline orchestration stopped for run_id=%s code=%s message=%s details=%s",
+                    run_id,
+                    exc.code,
+                    exc.message,
+                    exc.details,
+                )
+            except Exception:
+                app.logger.exception("Pipeline orchestration crashed for run_id=%s", run_id)
+            finally:
+                try:
+                    set_run_status_if_not_canceled(db_path, run_id, "queued")
+                except Exception:
+                    app.logger.exception("Failed to reset run status for run_id=%s", run_id)
+
+        threading.Thread(target=_background_execute, daemon=True).start()
+
+        return jsonify(
+            {
+                "ok": True,
+                "data": {
+                    "run_id": run_id,
+                    "stage_name": normalized_stage,
+                    "preserved_stages": preserved_stages,
+                    "reset_stages": reset_stages,
+                    "status": "running",
+                    "started_stage": started_stage,
+                },
+            }
         )
 
     @app.post("/api/v1/runs/<run_id>/cancel")

@@ -126,6 +126,18 @@ def set_run_status_if_not_canceled(db_path: str, run_id: str, status: str) -> No
         conn.commit()
 
 
+def list_runs(db_path: str) -> list[dict[str, str]]:
+    with open_connection(db_path) as conn:
+        init_schema(conn)
+        rows = conn.execute(
+            "SELECT run_id, status, created_at, reference_build FROM runs ORDER BY created_at DESC",
+        ).fetchall()
+    return [
+        {"run_id": row[0], "status": row[1], "created_at": row[2], "reference_build": row[3]}
+        for row in rows
+    ]
+
+
 def create_run(db_path: str) -> dict[str, str]:
     run_id = str(uuid.uuid4())
     status = "queued"

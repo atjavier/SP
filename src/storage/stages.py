@@ -21,6 +21,10 @@ _VALID_STAGE_STATUSES: frozenset[str] = frozenset(
 )
 
 
+class StageResetRunCanceledError(Exception):
+    pass
+
+
 @contextmanager
 def _maybe_connection(db_path: str, conn: sqlite3.Connection | None) -> Iterator[sqlite3.Connection]:
     if conn is not None:
@@ -201,6 +205,71 @@ def mark_stage_running(
         )
         if commit:
             active.commit()
+
+
+def reset_stage_and_downstream(
+    db_path: str,
+    run_id: str,
+    stage_name: str,
+    *,
+    conn: sqlite3.Connection | None = None,
+    commit: bool = True,
+) -> list[str]:
+    if stage_name not in PIPELINE_STAGE_ORDER:
+        raise ValueError(f"Unknown stage: {stage_name}")
+
+    start_index = PIPELINE_STAGE_ORDER.index(stage_name)
+    stages_to_reset = list(PIPELINE_STAGE_ORDER[start_index:])
+
+    with _maybe_connection(db_path, conn) as active:
+        init_schema(active)
+
+        began_transaction = False
+        if not active.in_transaction:
+            active.execute("BEGIN IMMEDIATE")
+            began_transaction = True
+
+        try:
+            run_row = active.execute(
+                "SELECT status FROM runs WHERE run_id = ?",
+                (run_id,),
+            ).fetchone()
+            if run_row and run_row[0] == "canceled":
+                raise StageResetRunCanceledError("Run is canceled.")
+
+            ensure_pipeline_stages_exist(db_path, run_id, conn=active, commit=False)
+
+            placeholders = ", ".join("?" for _ in stages_to_reset)
+            active.execute(
+                f"""
+                UPDATE run_stages
+                SET status = ?,
+                    started_at = NULL,
+                    completed_at = NULL,
+                    input_uploaded_at = NULL,
+                    stats_json = NULL,
+                    error_code = NULL,
+                    error_message = NULL,
+                    error_details_json = NULL
+                WHERE run_id = ?
+                  AND stage_name IN ({placeholders})
+                """,
+                ("queued", run_id, *stages_to_reset),
+            )
+
+            if stage_name == "parser":
+                from storage.variants import clear_variants_for_run
+
+                clear_variants_for_run(db_path, run_id, conn=active, commit=False)
+
+            if commit and began_transaction:
+                active.commit()
+        except Exception:
+            if began_transaction:
+                active.rollback()
+            raise
+
+    return stages_to_reset
 
 
 def mark_stage_succeeded(

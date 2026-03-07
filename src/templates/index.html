@@ -44,6 +44,15 @@
                 New run
               </button>
               <button
+                id="retry-failed-stage-btn"
+                class="btn btn-sm btn-outline-warning"
+                type="button"
+                disabled
+                hidden
+              >
+                Retry from failed stage
+              </button>
+              <button
                 id="cancel-run-btn"
                 class="btn btn-sm btn-outline-danger"
                 type="button"
@@ -75,6 +84,11 @@
                 role="status"
                 aria-live="polite"
               ></div>
+            </div>
+
+            <div class="mt-3 small" role="status" aria-live="polite">
+              <span class="text-secondary">Live updates:</span>
+              <span id="live-updates-indicator" class="ms-1 text-secondary">Not connected.</span>
             </div>
 
             <div id="run-status-message" class="mt-3" role="status" aria-live="polite"></div>
