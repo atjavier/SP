@@ -2,6 +2,20 @@ body {
   background: #f8f9fa;
 }
 
+/* Bootstrap default code color is pink; use a neutral tone for this app. */
+code {
+  color: #1f2937;
+  background: #eef2f7;
+  padding: 0.08rem 0.3rem;
+  border-radius: 0.25rem;
+}
+
+.badge code {
+  color: inherit;
+  background: transparent;
+  padding: 0;
+}
+
 /* Keep keyboard focus obvious; do not remove outlines. */
 :focus-visible {
   outline: 2px solid rgba(13, 110, 253, 0.9);

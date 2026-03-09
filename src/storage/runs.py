@@ -1,4 +1,5 @@
 import uuid
+import json
 from datetime import datetime, timezone
 
 from storage.db import init_schema, open_connection
@@ -32,6 +33,61 @@ class RunNotStartableError(Exception):
 
 
 _VALID_RUN_STATUSES: frozenset[str] = frozenset({"queued", "running", "canceled"})
+
+
+def recover_interrupted_runs(db_path: str) -> dict[str, int]:
+    """
+    Normalize stale `running` runs after process restart/interruption.
+
+    - runs.status=running -> queued
+    - run_stages.status=running -> failed (RUN_INTERRUPTED)
+    """
+    with open_connection(db_path) as conn:
+        init_schema(conn)
+        conn.execute("BEGIN IMMEDIATE")
+        running_rows = conn.execute(
+            "SELECT run_id FROM runs WHERE status = ?",
+            ("running",),
+        ).fetchall()
+        if not running_rows:
+            conn.commit()
+            return {"runs_recovered": 0, "stages_recovered": 0}
+
+        run_ids = [row[0] for row in running_rows]
+        placeholders = ", ".join("?" for _ in run_ids)
+        interrupted_at = datetime.now(timezone.utc).isoformat()
+        interrupted_details = json.dumps({"reason": "startup_recovery"})
+
+        stage_cursor = conn.execute(
+            f"""
+            UPDATE run_stages
+            SET status = ?,
+                completed_at = ?,
+                stats_json = NULL,
+                error_code = COALESCE(error_code, ?),
+                error_message = COALESCE(error_message, ?),
+                error_details_json = COALESCE(error_details_json, ?)
+            WHERE run_id IN ({placeholders})
+              AND status = ?
+            """,
+            (
+                "failed",
+                interrupted_at,
+                "RUN_INTERRUPTED",
+                "Run was interrupted before completion.",
+                interrupted_details,
+                *run_ids,
+                "running",
+            ),
+        )
+        stages_recovered = max(0, int(stage_cursor.rowcount or 0))
+
+        conn.execute(
+            "UPDATE runs SET status = ? WHERE status = ?",
+            ("queued", "running"),
+        )
+        conn.commit()
+        return {"runs_recovered": len(run_ids), "stages_recovered": stages_recovered}
 
 
 def get_running_run_id(db_path: str) -> str | None:
@@ -195,12 +251,16 @@ def cancel_run(db_path: str, run_id: str) -> dict[str, str]:
             )
 
             from storage.classifications import clear_classifications_for_run
+            from storage.clinvar_evidence import clear_clinvar_evidence_for_run
+            from storage.dbsnp_evidence import clear_dbsnp_evidence_for_run
             from storage.pre_annotations import clear_pre_annotations_for_run
             from storage.predictor_outputs import clear_predictor_outputs_for_run
 
             clear_pre_annotations_for_run(db_path, run_id, conn=conn, commit=False)
             clear_classifications_for_run(db_path, run_id, conn=conn, commit=False)
             clear_predictor_outputs_for_run(db_path, run_id, conn=conn, commit=False)
+            clear_dbsnp_evidence_for_run(db_path, run_id, conn=conn, commit=False)
+            clear_clinvar_evidence_for_run(db_path, run_id, conn=conn, commit=False)
             conn.commit()
 
             row = conn.execute(

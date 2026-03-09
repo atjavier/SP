@@ -36,6 +36,14 @@
   let lastStagesSnapshot = null;
   let eventSource = null;
   let elapsedTimerId = null;
+  const dateTimeFormatter = new Intl.DateTimeFormat("en-US", {
+    month: "2-digit",
+    day: "2-digit",
+    year: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+  });
 
   function clearMessage() {
     while (messageEl.firstChild) {
@@ -111,6 +119,13 @@
     const d = new Date(iso);
     if (Number.isNaN(d.getTime())) return null;
     return d;
+  }
+
+  function formatDateTime(iso) {
+    if (!iso) return "\u2014";
+    const d = parseIsoDate(iso);
+    if (!d) return String(iso);
+    return dateTimeFormatter.format(d);
   }
 
   function formatElapsed(ms) {
@@ -343,6 +358,23 @@
     return null;
   }
 
+  function isTerminalPipelineSnapshot(stages) {
+    if (!Array.isArray(stages) || stages.length === 0) return false;
+    const hasRunning = stages.some((stage) => stage?.status === "running");
+    if (hasRunning) return false;
+    const hasFailedOrCanceled = stages.some((stage) => {
+      const status = stage?.status;
+      return status === "failed" || status === "canceled";
+    });
+    if (hasFailedOrCanceled) return true;
+    for (const stageName of PIPELINE_STAGE_ORDER) {
+      if (stageName !== "reporting") continue;
+      const stage = stages.find((entry) => (entry?.stage_name ?? null) === stageName);
+      return stage?.status === "succeeded";
+    }
+    return false;
+  }
+
   function updateRetryControl(stages) {
     if (!retryFailedStageBtn) return;
 
@@ -435,9 +467,9 @@
       }
 
       const startedEl = li.querySelector('[data-role="stage-started-at"]');
-      if (startedEl) startedEl.textContent = stage?.started_at ?? "\u2014";
+      if (startedEl) startedEl.textContent = formatDateTime(stage?.started_at ?? null);
       const completedEl = li.querySelector('[data-role="stage-completed-at"]');
-      if (completedEl) completedEl.textContent = stage?.completed_at ?? "\u2014";
+      if (completedEl) completedEl.textContent = formatDateTime(stage?.completed_at ?? null);
 
       const badgeEl = li.querySelector('[data-role="stage-badge"]');
       if (badgeEl) {
@@ -455,6 +487,11 @@
     }
 
     updateRetryControl(stages);
+
+    if (isTerminalPipelineSnapshot(stages)) {
+      closeEventSource();
+      setLiveUpdates("success", "Live updates: completed.");
+    }
   }
 
   function setLiveUpdates(kind, text) {

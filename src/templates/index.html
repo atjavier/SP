@@ -404,6 +404,17 @@
                         role="status"
                         aria-live="polite"
                       ></div>
+                      <div class="form-check form-switch mt-2">
+                        <input
+                          class="form-check-input"
+                          type="checkbox"
+                          role="switch"
+                          id="prediction-show-not-applicable"
+                        />
+                        <label class="form-check-label small" for="prediction-show-not-applicable">
+                          Show <code>not_applicable</code> rows
+                        </label>
+                      </div>
                       <div class="results-scroll-box mt-2">
                         <div class="table-responsive">
                           <table
@@ -414,11 +425,10 @@
                             <thead class="table-light">
                               <tr>
                                 <th scope="col">Variant</th>
-                                <th scope="col">Predictor</th>
-                                <th scope="col">Outcome</th>
-                                <th scope="col">Score</th>
-                                <th scope="col">Label</th>
-                                <th scope="col">Reason</th>
+                                <th scope="col">SIFT</th>
+                                <th scope="col">PolyPhen-2</th>
+                                <th scope="col">AlphaMissense</th>
+                                <th scope="col">Notes</th>
                               </tr>
                             </thead>
                             <tbody id="prediction-results-body"></tbody>
@@ -449,6 +459,36 @@
                         aria-live="polite"
                       ></div>
                       <div id="annotation-results-summary" class="small mt-2 results-scroll-box results-scroll-summary"></div>
+                      <div class="mt-3">
+                        <div class="small fw-semibold mb-1">Evidence Diagnostics</div>
+                        <div
+                          id="annotation-diagnostics-message"
+                          class="small text-secondary"
+                          role="status"
+                          aria-live="polite"
+                        ></div>
+                        <div class="results-scroll-box mt-2">
+                          <div class="table-responsive">
+                            <table
+                              id="annotation-diagnostics-table"
+                              class="table table-sm table-striped table-hover align-middle mb-0"
+                              hidden
+                            >
+                              <thead class="table-light">
+                                <tr>
+                                  <th scope="col">Source</th>
+                                  <th scope="col">Enabled</th>
+                                  <th scope="col">Errors</th>
+                                  <th scope="col">Top reason codes</th>
+                                  <th scope="col">HTTP status counts</th>
+                                  <th scope="col">Hint</th>
+                                </tr>
+                              </thead>
+                              <tbody id="annotation-diagnostics-body"></tbody>
+                            </table>
+                          </div>
+                        </div>
+                      </div>
                       <div class="mt-3">
                         <div class="small fw-semibold mb-1">Annotated VCF Output</div>
                         <div

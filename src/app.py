@@ -43,10 +43,27 @@ def create_app(config_overrides: dict[str, Any] | None = None) -> Flask:
         if "SP_MAX_UPLOAD_BYTES" in app.config:
             app.config["MAX_CONTENT_LENGTH"] = app.config["SP_MAX_UPLOAD_BYTES"]
 
+    try:
+        from storage.runs import recover_interrupted_runs
+
+        recovered = recover_interrupted_runs(app.config["SP_DB_PATH"])
+        if recovered.get("runs_recovered"):
+            app.logger.warning(
+                "Recovered interrupted runs at startup: runs=%s stages=%s",
+                recovered.get("runs_recovered", 0),
+                recovered.get("stages_recovered", 0),
+            )
+    except Exception:
+        app.logger.exception("Failed to recover interrupted runs at startup")
+
     if app.config.get("TESTING"):
         # Unit tests should not execute external tools like Java/SnpEff even if
         # a developer has them configured in their shell environment.
         os.environ["SP_SNPEFF_ENABLED"] = "0"
+        # Keep tests fully offline by default for evidence lookups.
+        os.environ["SP_DBSNP_ENABLED"] = "0"
+        os.environ["SP_CLINVAR_ENABLED"] = "0"
+        os.environ["SP_GNOMAD_ENABLED"] = "0"
         # Unit tests should also avoid depending on a locally installed VEP.
         # Keep these settings on app config (not process-global env) and pass
         # them explicitly to the prediction stage via the orchestrator.
@@ -450,6 +467,172 @@ def create_app(config_overrides: dict[str, Any] | None = None) -> Flask:
             )
 
         return jsonify({"ok": True, "data": {"run_id": run_id, "stage": stage or None, "pre_annotations": rows}})
+
+    @app.get("/api/v1/runs/<run_id>/dbsnp_evidence")
+    def get_run_dbsnp_evidence(run_id: str):
+        from storage.dbsnp_evidence import list_dbsnp_evidence_for_run
+        from storage.runs import get_run as get_run_record
+        from storage.run_inputs import get_run_input
+        from storage.stages import get_stage
+
+        db_path = app.config["SP_DB_PATH"]
+        limit_raw = (request.args.get("limit") or "").strip()
+        limit = 100
+        if limit_raw:
+            try:
+                limit = int(limit_raw)
+            except ValueError:
+                limit = 100
+        limit = max(1, min(limit, 1000))
+        variant_id = (request.args.get("variant_id") or "").strip() or None
+
+        try:
+            run = get_run_record(db_path, run_id)
+        except Exception:
+            app.logger.exception("Failed to fetch run record for dbSNP evidence listing")
+            return (
+                jsonify(
+                    {
+                        "ok": False,
+                        "error": {"code": "RUN_FETCH_FAILED", "message": "Failed to fetch run record."},
+                    }
+                ),
+                500,
+            )
+
+        if not run:
+            return (
+                jsonify({"ok": False, "error": {"code": "RUN_NOT_FOUND", "message": "Run not found."}}),
+                404,
+            )
+
+        run_input = get_run_input(db_path, run_id)
+        latest_uploaded_at = run_input.get("uploaded_at") if run_input else None
+        stage = get_stage(db_path, run_id, "annotation") or {}
+
+        stage_same_input = (
+            bool(latest_uploaded_at)
+            and stage.get("status") == "succeeded"
+            and stage.get("input_uploaded_at") == latest_uploaded_at
+        )
+        if not stage_same_input:
+            return jsonify(
+                {
+                    "ok": True,
+                    "data": {
+                        "run_id": run_id,
+                        "stage": stage or None,
+                        "dbsnp_evidence": [],
+                    },
+                }
+            )
+
+        try:
+            rows = list_dbsnp_evidence_for_run(
+                db_path,
+                run_id,
+                variant_id=variant_id,
+                limit=limit,
+            )
+        except Exception:
+            app.logger.exception("Failed to fetch dbSNP evidence for run_id=%s", run_id)
+            return (
+                jsonify(
+                    {
+                        "ok": False,
+                        "error": {
+                            "code": "DBSNP_EVIDENCE_FETCH_FAILED",
+                            "message": "Failed to fetch dbSNP evidence.",
+                        },
+                    }
+                ),
+                500,
+            )
+
+        return jsonify({"ok": True, "data": {"run_id": run_id, "stage": stage or None, "dbsnp_evidence": rows}})
+
+    @app.get("/api/v1/runs/<run_id>/clinvar_evidence")
+    def get_run_clinvar_evidence(run_id: str):
+        from storage.clinvar_evidence import list_clinvar_evidence_for_run
+        from storage.runs import get_run as get_run_record
+        from storage.run_inputs import get_run_input
+        from storage.stages import get_stage
+
+        db_path = app.config["SP_DB_PATH"]
+        limit_raw = (request.args.get("limit") or "").strip()
+        limit = 100
+        if limit_raw:
+            try:
+                limit = int(limit_raw)
+            except ValueError:
+                limit = 100
+        limit = max(1, min(limit, 1000))
+        variant_id = (request.args.get("variant_id") or "").strip() or None
+
+        try:
+            run = get_run_record(db_path, run_id)
+        except Exception:
+            app.logger.exception("Failed to fetch run record for ClinVar evidence listing")
+            return (
+                jsonify(
+                    {
+                        "ok": False,
+                        "error": {"code": "RUN_FETCH_FAILED", "message": "Failed to fetch run record."},
+                    }
+                ),
+                500,
+            )
+
+        if not run:
+            return (
+                jsonify({"ok": False, "error": {"code": "RUN_NOT_FOUND", "message": "Run not found."}}),
+                404,
+            )
+
+        run_input = get_run_input(db_path, run_id)
+        latest_uploaded_at = run_input.get("uploaded_at") if run_input else None
+        stage = get_stage(db_path, run_id, "annotation") or {}
+
+        stage_same_input = (
+            bool(latest_uploaded_at)
+            and stage.get("status") == "succeeded"
+            and stage.get("input_uploaded_at") == latest_uploaded_at
+        )
+        if not stage_same_input:
+            return jsonify(
+                {
+                    "ok": True,
+                    "data": {
+                        "run_id": run_id,
+                        "stage": stage or None,
+                        "clinvar_evidence": [],
+                    },
+                }
+            )
+
+        try:
+            rows = list_clinvar_evidence_for_run(
+                db_path,
+                run_id,
+                variant_id=variant_id,
+                limit=limit,
+            )
+        except Exception:
+            app.logger.exception("Failed to fetch ClinVar evidence for run_id=%s", run_id)
+            return (
+                jsonify(
+                    {
+                        "ok": False,
+                        "error": {
+                            "code": "CLINVAR_EVIDENCE_FETCH_FAILED",
+                            "message": "Failed to fetch ClinVar evidence.",
+                        },
+                    }
+                ),
+                500,
+            )
+
+        return jsonify({"ok": True, "data": {"run_id": run_id, "stage": stage or None, "clinvar_evidence": rows}})
 
     @app.get("/api/v1/runs/<run_id>/annotation_output")
     def get_run_annotation_output(run_id: str):

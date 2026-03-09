@@ -321,6 +321,7 @@ class OrchestratorApiTestCase(unittest.TestCase):
             self.assertIn('id="variant-pred-sift-outcome"', html)
             self.assertIn('id="variant-pred-polyphen2-outcome"', html)
             self.assertIn('id="variant-pred-alphamissense-outcome"', html)
+            self.assertIn('id="prediction-show-not-applicable"', html)
 
     def test_pre_annotations_endpoint_returns_rows_and_gates_to_latest_upload(self):
         vcf_bytes = b"#CHROM\tPOS\tREF\tALT\n1\t1\tA\tG\n"
@@ -404,6 +405,135 @@ class OrchestratorApiTestCase(unittest.TestCase):
             stale_payload = json.loads(stale_listing.get_data(as_text=True))
             self.assertIs(stale_payload.get("ok"), True)
             self.assertEqual(stale_payload["data"]["preview_lines"], [])
+
+    def test_dbsnp_evidence_endpoint_is_stage_gated_to_latest_upload(self):
+        vcf_bytes = b"#CHROM\tPOS\tREF\tALT\n1\t1\tA\tG\n"
+        vcf_bytes_new = b"#CHROM\tPOS\tREF\tALT\n1\t2\tA\tT\n"
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = os.path.join(tmpdir, "sp.db")
+            client = self._create_client(db_path)
+
+            run_id = self._create_run(client)
+            upload_payload = json.loads(self._upload(client, run_id, vcf_bytes).get_data(as_text=True))
+            uploaded_at = upload_payload["data"]["uploaded_at"]
+
+            self.assertEqual(client.post(f"/api/v1/runs/{run_id}/start").status_code, 200)
+            self.assertEqual(self._wait_for_run_not_running(client, run_id), "queued")
+
+            listing = client.get(f"/api/v1/runs/{run_id}/dbsnp_evidence?limit=50")
+            self.assertEqual(listing.status_code, 200)
+            payload = json.loads(listing.get_data(as_text=True))
+            self.assertIs(payload.get("ok"), True)
+            self.assertEqual(payload["data"]["run_id"], run_id)
+            self.assertEqual(payload["data"]["stage"]["status"], "succeeded")
+            self.assertIn("dbsnp_evidence", payload["data"])
+            self.assertEqual(payload["data"]["dbsnp_evidence"], [])
+
+            upload_payload_2 = json.loads(self._upload(client, run_id, vcf_bytes_new).get_data(as_text=True))
+            uploaded_at_2 = upload_payload_2["data"]["uploaded_at"]
+            if uploaded_at_2 == uploaded_at:
+                upload_payload_2 = json.loads(self._upload(client, run_id, vcf_bytes_new).get_data(as_text=True))
+                uploaded_at_2 = upload_payload_2["data"]["uploaded_at"]
+            self.assertNotEqual(uploaded_at, uploaded_at_2)
+
+            stale_listing = client.get(f"/api/v1/runs/{run_id}/dbsnp_evidence?limit=50")
+            self.assertEqual(stale_listing.status_code, 200)
+            stale_payload = json.loads(stale_listing.get_data(as_text=True))
+            self.assertIs(stale_payload.get("ok"), True)
+            self.assertEqual(stale_payload["data"]["dbsnp_evidence"], [])
+
+    def test_clinvar_evidence_endpoint_is_stage_gated_to_latest_upload(self):
+        vcf_bytes = b"#CHROM\tPOS\tREF\tALT\n1\t1\tA\tG\n1\t2\tC\tT\n"
+        vcf_bytes_new = b"#CHROM\tPOS\tREF\tALT\n1\t2\tA\tT\n"
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = os.path.join(tmpdir, "sp.db")
+            client = self._create_client(db_path)
+
+            run_id = self._create_run(client)
+            upload_payload = json.loads(self._upload(client, run_id, vcf_bytes).get_data(as_text=True))
+            uploaded_at = upload_payload["data"]["uploaded_at"]
+
+            class Response:
+                def __init__(self, body: str, code: int = 200):
+                    self.status = code
+                    self._body = body.encode("utf-8")
+
+                def read(self):
+                    return self._body
+
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, exc_type, exc, tb):
+                    return False
+
+            def fake_urlopen(req, timeout=10):
+                del timeout
+                if "esearch.fcgi" in req.full_url:
+                    return Response('{"esearchresult":{"idlist":["123"]}}')
+                return Response(
+                    '{"result":{"uids":["123"],"123":{"uid":"123","accession":"VCV000123.2","clinical_significance":{"description":"Pathogenic"}}}}'
+                )
+
+            with patch.dict(
+                os.environ,
+                {
+                    "SP_SNPEFF_ENABLED": "0",
+                    "SP_DBSNP_ENABLED": "0",
+                    "SP_CLINVAR_ENABLED": "1",
+                    "SP_CLINVAR_TIMEOUT_SECONDS": "5",
+                    "SP_CLINVAR_RETRY_MAX_ATTEMPTS": "3",
+                    "SP_CLINVAR_RETRY_BACKOFF_BASE_SECONDS": "0",
+                    "SP_CLINVAR_RETRY_BACKOFF_MAX_SECONDS": "0",
+                },
+                clear=False,
+            ):
+                with (
+                    patch("pipeline.clinvar_client.urlopen", side_effect=fake_urlopen),
+                    patch("pipeline.clinvar_client.time.sleep", return_value=None),
+                ):
+                    self.assertEqual(client.post(f"/api/v1/runs/{run_id}/start").status_code, 200)
+                    self.assertEqual(self._wait_for_run_not_running(client, run_id), "queued")
+
+            listing = client.get(f"/api/v1/runs/{run_id}/clinvar_evidence?limit=50")
+            self.assertEqual(listing.status_code, 200)
+            payload = json.loads(listing.get_data(as_text=True))
+            self.assertIs(payload.get("ok"), True)
+            self.assertEqual(payload["data"]["run_id"], run_id)
+            self.assertEqual(payload["data"]["stage"]["status"], "succeeded")
+            self.assertIn("clinvar_evidence", payload["data"])
+            rows = payload["data"]["clinvar_evidence"]
+            self.assertEqual(len(rows), 2)
+            self.assertTrue(all(row["source"] == "clinvar" for row in rows))
+            self.assertTrue(all(row["outcome"] == "found" for row in rows))
+            self.assertTrue(all(row["clinvar_id"] == "VCV000123" for row in rows))
+
+            variant_id = rows[0]["variant_id"]
+            by_variant_listing = client.get(f"/api/v1/runs/{run_id}/clinvar_evidence?variant_id={variant_id}&limit=50")
+            self.assertEqual(by_variant_listing.status_code, 200)
+            by_variant_payload = json.loads(by_variant_listing.get_data(as_text=True))
+            self.assertIs(by_variant_payload.get("ok"), True)
+            self.assertEqual(len(by_variant_payload["data"]["clinvar_evidence"]), 1)
+            self.assertEqual(by_variant_payload["data"]["clinvar_evidence"][0]["variant_id"], variant_id)
+
+            limited_listing = client.get(f"/api/v1/runs/{run_id}/clinvar_evidence?limit=1")
+            self.assertEqual(limited_listing.status_code, 200)
+            limited_payload = json.loads(limited_listing.get_data(as_text=True))
+            self.assertIs(limited_payload.get("ok"), True)
+            self.assertEqual(len(limited_payload["data"]["clinvar_evidence"]), 1)
+
+            upload_payload_2 = json.loads(self._upload(client, run_id, vcf_bytes_new).get_data(as_text=True))
+            uploaded_at_2 = upload_payload_2["data"]["uploaded_at"]
+            if uploaded_at_2 == uploaded_at:
+                upload_payload_2 = json.loads(self._upload(client, run_id, vcf_bytes_new).get_data(as_text=True))
+                uploaded_at_2 = upload_payload_2["data"]["uploaded_at"]
+            self.assertNotEqual(uploaded_at, uploaded_at_2)
+
+            stale_listing = client.get(f"/api/v1/runs/{run_id}/clinvar_evidence?limit=50")
+            self.assertEqual(stale_listing.status_code, 200)
+            stale_payload = json.loads(stale_listing.get_data(as_text=True))
+            self.assertIs(stale_payload.get("ok"), True)
+            self.assertEqual(stale_payload["data"]["clinvar_evidence"], [])
 
     def test_start_begins_at_pre_annotation_when_parser_already_succeeded(self):
         vcf_bytes = b"#CHROM\tPOS\tREF\tALT\n1\t1\tA\tT\n"

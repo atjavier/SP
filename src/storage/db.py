@@ -1,5 +1,6 @@
 import os
 import sqlite3
+import threading
 from collections.abc import Iterator
 from contextlib import contextmanager
 
@@ -277,7 +278,203 @@ SCHEMA_STATEMENTS: tuple[str, ...] = (
         END;
     END;
     """,
+    """
+    CREATE TABLE IF NOT EXISTS run_dbsnp_evidence (
+      run_id TEXT NOT NULL,
+      variant_id TEXT NOT NULL,
+      source TEXT NOT NULL,
+      outcome TEXT NOT NULL,
+      rsid TEXT,
+      reason_code TEXT,
+      reason_message TEXT,
+      details_json TEXT NOT NULL,
+      retrieved_at TEXT NOT NULL,
+      PRIMARY KEY (run_id, variant_id, source),
+      FOREIGN KEY (run_id) REFERENCES runs(run_id),
+      FOREIGN KEY (variant_id) REFERENCES run_variants(variant_id) ON DELETE CASCADE
+    );
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_run_dbsnp_evidence_run_id ON run_dbsnp_evidence(run_id);",
+    "CREATE INDEX IF NOT EXISTS idx_run_dbsnp_evidence_source ON run_dbsnp_evidence(source);",
+    """
+    CREATE TRIGGER IF NOT EXISTS trg_run_dbsnp_evidence_run_match_insert
+    BEFORE INSERT ON run_dbsnp_evidence
+    FOR EACH ROW
+    BEGIN
+      SELECT
+        CASE
+          WHEN (SELECT run_id FROM run_variants WHERE variant_id = NEW.variant_id) != NEW.run_id
+          THEN RAISE(ABORT, 'RUN_VARIANT_MISMATCH')
+        END;
+    END;
+    """,
+    """
+    CREATE TRIGGER IF NOT EXISTS trg_run_dbsnp_evidence_run_match_update
+    BEFORE UPDATE OF run_id, variant_id ON run_dbsnp_evidence
+    FOR EACH ROW
+    BEGIN
+      SELECT
+        CASE
+          WHEN (SELECT run_id FROM run_variants WHERE variant_id = NEW.variant_id) != NEW.run_id
+          THEN RAISE(ABORT, 'RUN_VARIANT_MISMATCH')
+        END;
+    END;
+    """,
+    """
+    CREATE TRIGGER IF NOT EXISTS trg_run_dbsnp_evidence_validate_insert
+    BEFORE INSERT ON run_dbsnp_evidence
+    FOR EACH ROW
+    BEGIN
+      SELECT
+        CASE
+          WHEN NEW.source != 'dbsnp'
+          THEN RAISE(ABORT, 'INVALID_DBSNP_SOURCE')
+        END;
+      SELECT
+        CASE
+          WHEN NEW.outcome NOT IN ('found', 'not_found', 'error')
+          THEN RAISE(ABORT, 'INVALID_DBSNP_OUTCOME')
+        END;
+      SELECT
+        CASE
+          WHEN NEW.outcome = 'found' AND NEW.rsid IS NULL
+          THEN RAISE(ABORT, 'MISSING_RSID')
+        END;
+      SELECT
+        CASE
+          WHEN NEW.outcome IN ('not_found', 'error') AND NEW.rsid IS NOT NULL
+          THEN RAISE(ABORT, 'RSID_MUST_BE_NULL')
+        END;
+    END;
+    """,
+    """
+    CREATE TRIGGER IF NOT EXISTS trg_run_dbsnp_evidence_validate_update
+    BEFORE UPDATE OF source, outcome, rsid ON run_dbsnp_evidence
+    FOR EACH ROW
+    BEGIN
+      SELECT
+        CASE
+          WHEN NEW.source != 'dbsnp'
+          THEN RAISE(ABORT, 'INVALID_DBSNP_SOURCE')
+        END;
+      SELECT
+        CASE
+          WHEN NEW.outcome NOT IN ('found', 'not_found', 'error')
+          THEN RAISE(ABORT, 'INVALID_DBSNP_OUTCOME')
+        END;
+      SELECT
+        CASE
+          WHEN NEW.outcome = 'found' AND NEW.rsid IS NULL
+          THEN RAISE(ABORT, 'MISSING_RSID')
+        END;
+      SELECT
+        CASE
+          WHEN NEW.outcome IN ('not_found', 'error') AND NEW.rsid IS NOT NULL
+          THEN RAISE(ABORT, 'RSID_MUST_BE_NULL')
+        END;
+    END;
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS run_clinvar_evidence (
+      run_id TEXT NOT NULL,
+      variant_id TEXT NOT NULL,
+      source TEXT NOT NULL,
+      outcome TEXT NOT NULL,
+      clinvar_id TEXT,
+      clinical_significance TEXT,
+      reason_code TEXT,
+      reason_message TEXT,
+      details_json TEXT NOT NULL,
+      retrieved_at TEXT NOT NULL,
+      PRIMARY KEY (run_id, variant_id, source),
+      FOREIGN KEY (run_id) REFERENCES runs(run_id),
+      FOREIGN KEY (variant_id) REFERENCES run_variants(variant_id) ON DELETE CASCADE
+    );
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_run_clinvar_evidence_run_id ON run_clinvar_evidence(run_id);",
+    "CREATE INDEX IF NOT EXISTS idx_run_clinvar_evidence_source ON run_clinvar_evidence(source);",
+    """
+    CREATE TRIGGER IF NOT EXISTS trg_run_clinvar_evidence_run_match_insert
+    BEFORE INSERT ON run_clinvar_evidence
+    FOR EACH ROW
+    BEGIN
+      SELECT
+        CASE
+          WHEN (SELECT run_id FROM run_variants WHERE variant_id = NEW.variant_id) != NEW.run_id
+          THEN RAISE(ABORT, 'RUN_VARIANT_MISMATCH')
+        END;
+    END;
+    """,
+    """
+    CREATE TRIGGER IF NOT EXISTS trg_run_clinvar_evidence_run_match_update
+    BEFORE UPDATE OF run_id, variant_id ON run_clinvar_evidence
+    FOR EACH ROW
+    BEGIN
+      SELECT
+        CASE
+          WHEN (SELECT run_id FROM run_variants WHERE variant_id = NEW.variant_id) != NEW.run_id
+          THEN RAISE(ABORT, 'RUN_VARIANT_MISMATCH')
+        END;
+    END;
+    """,
+    """
+    CREATE TRIGGER IF NOT EXISTS trg_run_clinvar_evidence_validate_insert
+    BEFORE INSERT ON run_clinvar_evidence
+    FOR EACH ROW
+    BEGIN
+      SELECT
+        CASE
+          WHEN NEW.source != 'clinvar'
+          THEN RAISE(ABORT, 'INVALID_CLINVAR_SOURCE')
+        END;
+      SELECT
+        CASE
+          WHEN NEW.outcome NOT IN ('found', 'not_found', 'error')
+          THEN RAISE(ABORT, 'INVALID_CLINVAR_OUTCOME')
+        END;
+      SELECT
+        CASE
+          WHEN NEW.outcome = 'found' AND NEW.clinvar_id IS NULL
+          THEN RAISE(ABORT, 'MISSING_CLINVAR_ID')
+        END;
+      SELECT
+        CASE
+          WHEN NEW.outcome IN ('not_found', 'error') AND NEW.clinvar_id IS NOT NULL
+          THEN RAISE(ABORT, 'CLINVAR_ID_MUST_BE_NULL')
+        END;
+    END;
+    """,
+    """
+    CREATE TRIGGER IF NOT EXISTS trg_run_clinvar_evidence_validate_update
+    BEFORE UPDATE OF source, outcome, clinvar_id ON run_clinvar_evidence
+    FOR EACH ROW
+    BEGIN
+      SELECT
+        CASE
+          WHEN NEW.source != 'clinvar'
+          THEN RAISE(ABORT, 'INVALID_CLINVAR_SOURCE')
+        END;
+      SELECT
+        CASE
+          WHEN NEW.outcome NOT IN ('found', 'not_found', 'error')
+          THEN RAISE(ABORT, 'INVALID_CLINVAR_OUTCOME')
+        END;
+      SELECT
+        CASE
+          WHEN NEW.outcome = 'found' AND NEW.clinvar_id IS NULL
+          THEN RAISE(ABORT, 'MISSING_CLINVAR_ID')
+        END;
+      SELECT
+        CASE
+          WHEN NEW.outcome IN ('not_found', 'error') AND NEW.clinvar_id IS NOT NULL
+          THEN RAISE(ABORT, 'CLINVAR_ID_MUST_BE_NULL')
+        END;
+    END;
+    """,
 )
+
+_SCHEMA_INIT_LOCK = threading.Lock()
+_SCHEMA_INIT_CACHE: set[str] = set()
 
 
 def ensure_parent_dir(path: str) -> None:
@@ -290,6 +487,9 @@ def ensure_parent_dir(path: str) -> None:
 def connect(db_path: str) -> sqlite3.Connection:
     ensure_parent_dir(db_path)
     conn = sqlite3.connect(db_path, timeout=30)
+    conn.execute("PRAGMA busy_timeout = 30000;")
+    if db_path != ":memory:":
+        conn.execute("PRAGMA journal_mode = WAL;")
     conn.execute("PRAGMA foreign_keys = ON;")
     return conn
 
@@ -304,12 +504,33 @@ def open_connection(db_path: str) -> Iterator[sqlite3.Connection]:
 
 
 def init_schema(conn: sqlite3.Connection) -> None:
-    was_in_transaction = conn.in_transaction
-    for statement in SCHEMA_STATEMENTS:
-        conn.execute(statement)
-    _apply_schema_migrations(conn)
-    if not was_in_transaction:
-        conn.commit()
+    cache_key = _connection_cache_key(conn)
+    if cache_key in _SCHEMA_INIT_CACHE:
+        return
+
+    with _SCHEMA_INIT_LOCK:
+        if cache_key in _SCHEMA_INIT_CACHE:
+            return
+
+        was_in_transaction = conn.in_transaction
+        for statement in SCHEMA_STATEMENTS:
+            conn.execute(statement)
+        _apply_schema_migrations(conn)
+        if not was_in_transaction:
+            conn.commit()
+
+        _SCHEMA_INIT_CACHE.add(cache_key)
+
+
+def _connection_cache_key(conn: sqlite3.Connection) -> str:
+    try:
+        row = conn.execute("PRAGMA database_list;").fetchone()
+    except Exception:
+        row = None
+    path = (row[2] if row and len(row) > 2 else "") or ""
+    if path:
+        return os.path.abspath(path)
+    return f":memory:{id(conn)}"
 
 
 def _apply_schema_migrations(conn: sqlite3.Connection) -> None:

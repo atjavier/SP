@@ -5,9 +5,14 @@ import shlex
 import subprocess
 from datetime import datetime, timezone
 
+from pipeline.clinvar_client import ClinvarConfig, fetch_clinvar_evidence_for_variant
+from pipeline.dbsnp_client import DbsnpConfig, fetch_dbsnp_evidence_for_variant
+from pipeline.gnomad_client import GnomadConfig, fetch_gnomad_evidence_for_variant
 from pipeline.parser_stage import StageExecutionError
 from storage.db import connect as _connect_db
 from storage.db import init_schema as _init_schema
+from storage.clinvar_evidence import clear_clinvar_evidence_for_run, upsert_clinvar_evidence_for_run
+from storage.dbsnp_evidence import clear_dbsnp_evidence_for_run, upsert_dbsnp_evidence_for_run
 from storage.run_artifacts import ensure_run_artifacts_dir
 from storage.stages import (
     mark_stage_canceled,
@@ -15,6 +20,7 @@ from storage.stages import (
     mark_stage_running,
     mark_stage_succeeded,
 )
+from storage.variants import iter_variants_for_run_with_ids
 
 
 def _get_run_status(conn, run_id: str) -> str | None:
@@ -53,6 +59,101 @@ def _positive_int_env(name: str, default: int) -> int:
     if value < 1:
         return default
     return value
+
+
+def _positive_float_env(name: str, default: float) -> float:
+    raw = (os.environ.get(name) or "").strip()
+    if not raw:
+        return default
+    try:
+        value = float(raw)
+    except ValueError:
+        return default
+    if value < 0:
+        return default
+    return value
+
+
+def _dbsnp_config(reference_build: str | None) -> DbsnpConfig:
+    enabled_raw = os.environ.get("SP_DBSNP_ENABLED")
+    enabled = _truthy_env("SP_DBSNP_ENABLED") if enabled_raw is not None else True
+    base_url = (os.environ.get("SP_DBSNP_API_BASE_URL") or "").strip() or "https://api.ncbi.nlm.nih.gov/variation/v0"
+    timeout_seconds = _positive_int_env("SP_DBSNP_TIMEOUT_SECONDS", 10)
+    retry_max_attempts = _positive_int_env("SP_DBSNP_RETRY_MAX_ATTEMPTS", 3)
+    backoff_base = _positive_float_env("SP_DBSNP_RETRY_BACKOFF_BASE_SECONDS", 0.5)
+    backoff_max = _positive_float_env("SP_DBSNP_RETRY_BACKOFF_MAX_SECONDS", 8.0)
+    if backoff_max < backoff_base:
+        backoff_max = backoff_base
+    api_key = (os.environ.get("SP_DBSNP_API_KEY") or "").strip() or None
+    assembly = (os.environ.get("SP_DBSNP_ASSEMBLY") or "").strip() or (reference_build or "GRCh38")
+    return DbsnpConfig(
+        enabled=enabled,
+        api_base_url=base_url,
+        timeout_seconds=timeout_seconds,
+        retry_max_attempts=retry_max_attempts,
+        retry_backoff_base_seconds=backoff_base,
+        retry_backoff_max_seconds=backoff_max,
+        api_key=api_key,
+        assembly=assembly,
+    )
+
+
+def _clinvar_config() -> ClinvarConfig:
+    enabled_raw = os.environ.get("SP_CLINVAR_ENABLED")
+    enabled = _truthy_env("SP_CLINVAR_ENABLED") if enabled_raw is not None else True
+    base_url = (
+        (os.environ.get("SP_CLINVAR_API_BASE_URL") or "").strip()
+        or "https://eutils.ncbi.nlm.nih.gov/entrez/eutils"
+    )
+    timeout_seconds = _positive_int_env("SP_CLINVAR_TIMEOUT_SECONDS", 10)
+    retry_max_attempts = _positive_int_env("SP_CLINVAR_RETRY_MAX_ATTEMPTS", 3)
+    backoff_base = _positive_float_env("SP_CLINVAR_RETRY_BACKOFF_BASE_SECONDS", 0.5)
+    backoff_max = _positive_float_env("SP_CLINVAR_RETRY_BACKOFF_MAX_SECONDS", 8.0)
+    if backoff_max < backoff_base:
+        backoff_max = backoff_base
+    api_key = (os.environ.get("SP_CLINVAR_API_KEY") or "").strip() or None
+    return ClinvarConfig(
+        enabled=enabled,
+        api_base_url=base_url,
+        timeout_seconds=timeout_seconds,
+        retry_max_attempts=retry_max_attempts,
+        retry_backoff_base_seconds=backoff_base,
+        retry_backoff_max_seconds=backoff_max,
+        api_key=api_key,
+    )
+
+
+def _gnomad_config() -> GnomadConfig:
+    enabled_raw = os.environ.get("SP_GNOMAD_ENABLED")
+    enabled = _truthy_env("SP_GNOMAD_ENABLED") if enabled_raw is not None else True
+    base_url = (os.environ.get("SP_GNOMAD_API_BASE_URL") or "").strip() or "https://gnomad.broadinstitute.org/api"
+    dataset_id = (os.environ.get("SP_GNOMAD_DATASET_ID") or "").strip() or "gnomad_r4"
+    reference_genome = (os.environ.get("SP_GNOMAD_REFERENCE_GENOME") or "").strip() or "GRCh38"
+    timeout_seconds = _positive_int_env("SP_GNOMAD_TIMEOUT_SECONDS", 10)
+    retry_max_attempts = _positive_int_env("SP_GNOMAD_RETRY_MAX_ATTEMPTS", 3)
+    backoff_base = _positive_float_env("SP_GNOMAD_RETRY_BACKOFF_BASE_SECONDS", 0.5)
+    backoff_max = _positive_float_env("SP_GNOMAD_RETRY_BACKOFF_MAX_SECONDS", 8.0)
+    min_request_interval_seconds = _positive_float_env("SP_GNOMAD_MIN_REQUEST_INTERVAL_SECONDS", 1.0)
+    if backoff_max < backoff_base:
+        backoff_max = backoff_base
+    return GnomadConfig(
+        enabled=enabled,
+        api_base_url=base_url,
+        dataset_id=dataset_id,
+        reference_genome=reference_genome,
+        timeout_seconds=timeout_seconds,
+        retry_max_attempts=retry_max_attempts,
+        retry_backoff_base_seconds=backoff_base,
+        retry_backoff_max_seconds=backoff_max,
+        min_request_interval_seconds=min_request_interval_seconds,
+    )
+
+
+def _annotation_fail_on_evidence_error() -> bool:
+    raw = os.environ.get("SP_ANNOTATION_FAIL_ON_EVIDENCE_ERROR")
+    if raw is None:
+        return False
+    return _truthy_env("SP_ANNOTATION_FAIL_ON_EVIDENCE_ERROR")
 
 
 def _apply_container_snpeff_fallback(config: dict) -> dict:
@@ -167,6 +268,10 @@ def _tail(text: str, max_chars: int = 1500) -> str:
     return text[-max_chars:]
 
 
+def _variant_key(variant: dict) -> str:
+    return f"{variant.get('chrom')}:{variant.get('pos')}:{variant.get('ref')}>{variant.get('alt')}"
+
+
 def run_annotation_stage(
     db_path: str,
     run_id: str,
@@ -176,7 +281,9 @@ def run_annotation_stage(
     force: bool = False,
 ) -> dict:
     created_at = datetime.now(timezone.utc).isoformat()
-    stats: dict = {"tool": "snpeff", "impl_version": "2026-03-09-r5"}
+    stats: dict = {"tool": "snpeff", "impl_version": "2026-03-09-r8"}
+    fail_on_evidence_error = _annotation_fail_on_evidence_error()
+    stats["fail_on_evidence_error"] = bool(fail_on_evidence_error)
 
     try:
         conn = _connect_db(db_path)
@@ -192,6 +299,8 @@ def run_annotation_stage(
             reference_build = _get_reference_build(conn, run_id)
 
             if run_status == "canceled":
+                clear_dbsnp_evidence_for_run(db_path, run_id, conn=conn, commit=False)
+                clear_clinvar_evidence_for_run(db_path, run_id, conn=conn, commit=False)
                 mark_stage_canceled(
                     db_path,
                     run_id,
@@ -214,6 +323,8 @@ def run_annotation_stage(
 
             prediction_status, prediction_uploaded_at = _get_stage_status(conn, run_id, "prediction")
             if prediction_status != "succeeded" or prediction_uploaded_at != uploaded_at:
+                clear_dbsnp_evidence_for_run(db_path, run_id, conn=conn, commit=False)
+                clear_clinvar_evidence_for_run(db_path, run_id, conn=conn, commit=False)
                 mark_stage_failed(
                     db_path,
                     run_id,
@@ -249,91 +360,42 @@ def run_annotation_stage(
             )
             conn.commit()
 
+            conn.execute("BEGIN IMMEDIATE")
+            clear_dbsnp_evidence_for_run(db_path, run_id, conn=conn, commit=False)
+            clear_clinvar_evidence_for_run(db_path, run_id, conn=conn, commit=False)
+            conn.commit()
+
             config = _snpeff_config(reference_build)
-            stats["enabled"] = bool(config.get("enabled"))
+            stats["snpeff_enabled"] = bool(config.get("enabled"))
             stats["reference_build"] = reference_build
             stats["genome"] = config.get("genome")
 
-            if not config.get("enabled"):
-                stats["note"] = "SnpEff is disabled (SP_SNPEFF_ENABLED=0)."
-                conn.execute("BEGIN IMMEDIATE")
-                mark_stage_succeeded(
-                    db_path,
-                    run_id,
-                    "annotation",
-                    input_uploaded_at=uploaded_at,
-                    stats=stats,
-                    conn=conn,
-                    commit=False,
-                )
-                conn.commit()
-                return {"annotation": {"status": "succeeded", "stats": stats}}
-
-            jar_path = config.get("jar_path")
-            if not jar_path or not os.path.exists(jar_path):
-                details = {
-                    "jar_path": jar_path,
-                    "sp_snpeff_jar_path": os.environ.get("SP_SNPEFF_JAR_PATH"),
-                    "sp_snpeff_home": os.environ.get("SP_SNPEFF_HOME"),
-                    "hint": (
-                        "Set SP_SNPEFF_JAR_PATH to snpEff.jar or set SP_SNPEFF_HOME "
-                        "to a directory containing snpEff.jar."
-                    ),
-                }
-                logger.warning(
-                    "SnpEff enabled but snpEff.jar is not configured for run_id=%s (SP_SNPEFF_JAR_PATH=%s SP_SNPEFF_HOME=%s)",
-                    run_id,
-                    os.environ.get("SP_SNPEFF_JAR_PATH"),
-                    os.environ.get("SP_SNPEFF_HOME"),
-                )
-                conn.execute("BEGIN IMMEDIATE")
-                mark_stage_failed(
-                    db_path,
-                    run_id,
-                    "annotation",
-                    input_uploaded_at=uploaded_at,
-                    error_code="SNPEFF_NOT_CONFIGURED",
-                    error_message="SnpEff is enabled but snpEff.jar is not configured or missing.",
-                    error_details=details,
-                    conn=conn,
-                    commit=False,
-                )
-                conn.commit()
-                raise StageExecutionError(
-                    500,
-                    "SNPEFF_NOT_CONFIGURED",
-                    "SnpEff is enabled but snpEff.jar is not configured or missing.",
-                    details=details,
-                )
-
-            workdir = config.get("home") or os.path.dirname(jar_path)
-
-            genome = config.get("genome") or "GRCh38.86"
-            data_dir_raw = (config.get("data_dir") or "").strip()
-            if not data_dir_raw:
-                data_dir_arg = "./data"
-            else:
-                data_dir_arg = data_dir_raw
-
-            if os.name == "nt" and os.path.isabs(data_dir_arg):
-                try:
-                    rel = os.path.relpath(data_dir_arg, workdir)
-                except ValueError:
-                    rel = None
-                if not rel or rel.startswith(".."):
+            if config.get("enabled"):
+                jar_path = config.get("jar_path")
+                if not jar_path or not os.path.exists(jar_path):
                     details = {
-                        "workdir": workdir,
-                        "data_dir": data_dir_arg,
-                        "hint": "On Windows, use a data dir under SP_SNPEFF_HOME (e.g. set SP_SNPEFF_DATA_DIR=./data).",
+                        "jar_path": jar_path,
+                        "sp_snpeff_jar_path": os.environ.get("SP_SNPEFF_JAR_PATH"),
+                        "sp_snpeff_home": os.environ.get("SP_SNPEFF_HOME"),
+                        "hint": (
+                            "Set SP_SNPEFF_JAR_PATH to snpEff.jar or set SP_SNPEFF_HOME "
+                            "to a directory containing snpEff.jar."
+                        ),
                     }
+                    logger.warning(
+                        "SnpEff enabled but snpEff.jar is not configured for run_id=%s (SP_SNPEFF_JAR_PATH=%s SP_SNPEFF_HOME=%s)",
+                        run_id,
+                        os.environ.get("SP_SNPEFF_JAR_PATH"),
+                        os.environ.get("SP_SNPEFF_HOME"),
+                    )
                     conn.execute("BEGIN IMMEDIATE")
                     mark_stage_failed(
                         db_path,
                         run_id,
                         "annotation",
                         input_uploaded_at=uploaded_at,
-                        error_code="SNPEFF_DATADIR_INVALID",
-                        error_message="SnpEff dataDir must be under SP_SNPEFF_HOME on Windows.",
+                        error_code="SNPEFF_NOT_CONFIGURED",
+                        error_message="SnpEff is enabled but snpEff.jar is not configured or missing.",
                         error_details=details,
                         conn=conn,
                         commit=False,
@@ -341,139 +403,85 @@ def run_annotation_stage(
                     conn.commit()
                     raise StageExecutionError(
                         500,
-                        "SNPEFF_DATADIR_INVALID",
-                        "SnpEff dataDir must be under SP_SNPEFF_HOME on Windows.",
+                        "SNPEFF_NOT_CONFIGURED",
+                        "SnpEff is enabled but snpEff.jar is not configured or missing.",
                         details=details,
                     )
-                data_dir_arg = rel
 
-            data_dir_fs = (
-                data_dir_arg
-                if os.path.isabs(data_dir_arg)
-                else os.path.normpath(os.path.join(workdir, data_dir_arg))
-            )
+                workdir = config.get("home") or os.path.dirname(jar_path)
+                genome = config.get("genome") or "GRCh38.86"
+                data_dir_raw = (config.get("data_dir") or "").strip()
+                data_dir_arg = data_dir_raw or "./data"
 
-            expected_genome_dir = os.path.join(data_dir_fs, genome) if data_dir_fs else ""
-            expected_db_file = (
-                os.path.join(expected_genome_dir, "snpEffectPredictor.bin")
-                if expected_genome_dir
-                else ""
-            )
-            if expected_db_file and not os.path.isfile(expected_db_file):
-                details = {
-                    "genome": genome,
-                    "data_dir": data_dir_fs,
-                    "expected_genome_dir": expected_genome_dir,
-                    "expected_db_file": expected_db_file,
-                    "hint": (
-                        f'Download the database first, e.g. '
-                        f'java -jar "{jar_path}" download -v -dataDir "{data_dir_fs}" {genome}'
-                    ),
-                }
-                logger.warning(
-                    "SnpEff enabled but genome database missing for run_id=%s genome=%s expected_db_file=%s",
-                    run_id,
-                    genome,
-                    expected_db_file,
-                )
-                conn.execute("BEGIN IMMEDIATE")
-                mark_stage_failed(
-                    db_path,
-                    run_id,
-                    "annotation",
-                    input_uploaded_at=uploaded_at,
-                    error_code="SNPEFF_DB_MISSING",
-                    error_message="SnpEff genome database is missing. Download it before running annotation.",
-                    error_details=details,
-                    conn=conn,
-                    commit=False,
-                )
-                conn.commit()
-                raise StageExecutionError(
-                    500,
-                    "SNPEFF_DB_MISSING",
-                    "SnpEff genome database is missing. Download it before running annotation.",
-                    details=details,
+                if os.name == "nt" and os.path.isabs(data_dir_arg):
+                    try:
+                        rel = os.path.relpath(data_dir_arg, workdir)
+                    except ValueError:
+                        rel = None
+                    if not rel or rel.startswith(".."):
+                        details = {
+                            "workdir": workdir,
+                            "data_dir": data_dir_arg,
+                            "hint": "On Windows, use a data dir under SP_SNPEFF_HOME (e.g. set SP_SNPEFF_DATA_DIR=./data).",
+                        }
+                        conn.execute("BEGIN IMMEDIATE")
+                        mark_stage_failed(
+                            db_path,
+                            run_id,
+                            "annotation",
+                            input_uploaded_at=uploaded_at,
+                            error_code="SNPEFF_DATADIR_INVALID",
+                            error_message="SnpEff dataDir must be under SP_SNPEFF_HOME on Windows.",
+                            error_details=details,
+                            conn=conn,
+                            commit=False,
+                        )
+                        conn.commit()
+                        raise StageExecutionError(
+                            500,
+                            "SNPEFF_DATADIR_INVALID",
+                            "SnpEff dataDir must be under SP_SNPEFF_HOME on Windows.",
+                            details=details,
+                        )
+                    data_dir_arg = rel
+
+                data_dir_fs = (
+                    data_dir_arg
+                    if os.path.isabs(data_dir_arg)
+                    else os.path.normpath(os.path.join(workdir, data_dir_arg))
                 )
 
-            artifacts_dir = ensure_run_artifacts_dir(db_path, run_id)
-            input_vcf_path = os.path.join(artifacts_dir, "snpeff.input.vcf")
-            output_vcf_path = os.path.join(artifacts_dir, "snpeff.annotated.vcf")
-
-            variants_written = _write_minimal_vcf_fast(conn, run_id, input_vcf_path)
-            timeout_seconds = int(config.get("timeout_seconds") or 900)
-            stats["input_vcf_path"] = input_vcf_path
-            stats["output_vcf_path"] = output_vcf_path
-            stats["variants_written"] = variants_written
-            stats["configured"] = True
-            stats["workdir"] = workdir
-            stats["data_dir"] = data_dir_fs
-            stats["data_dir_arg"] = data_dir_arg
-            stats["timeout_seconds"] = timeout_seconds
-
-            # In Docker, keep writable CWD under /app/instance while still
-            # pointing dataDir to the installed SnpEff database path.
-            if os.name == "nt":
-                cmd_data_dir = data_dir_arg
-                cmd_cwd = workdir
-            else:
-                cmd_data_dir = data_dir_fs
-                cmd_cwd = artifacts_dir
-            stats["command_workdir"] = cmd_cwd
-            stats["command_data_dir"] = cmd_data_dir
-
-            java_cmd = config.get("java_cmd") or "java"
-            java_xmx = config.get("java_xmx") or "2g"
-            extra_args = list(config.get("extra_args") or [])
-
-            cmd: list[str] = [
-                java_cmd,
-                f"-Xmx{java_xmx}",
-                "-jar",
-                jar_path,
-            ]
-            if config.get("config_path"):
-                cmd.extend(["-c", config["config_path"]])
-            if cmd_data_dir:
-                cmd.extend(["-dataDir", cmd_data_dir])
-            cmd.extend(extra_args)
-            cmd.extend([genome, input_vcf_path])
-
-            cwd = cmd_cwd
-            os.makedirs(os.path.dirname(output_vcf_path), exist_ok=True)
-            with open(output_vcf_path, "wb") as out_f:
-                try:
-                    completed = subprocess.run(
-                        cmd,
-                        cwd=cwd or None,
-                        stdout=out_f,
-                        stderr=subprocess.PIPE,
-                        check=False,
-                        timeout=timeout_seconds,
-                    )
-                except subprocess.TimeoutExpired as exc:
-                    stderr_raw = exc.stderr
-                    if isinstance(stderr_raw, bytes):
-                        stderr_text = stderr_raw.decode("utf-8", errors="replace")
-                    else:
-                        stderr_text = stderr_raw or ""
+                expected_genome_dir = os.path.join(data_dir_fs, genome) if data_dir_fs else ""
+                expected_db_file = (
+                    os.path.join(expected_genome_dir, "snpEffectPredictor.bin")
+                    if expected_genome_dir
+                    else ""
+                )
+                if expected_db_file and not os.path.isfile(expected_db_file):
                     details = {
-                        "timeout_seconds": timeout_seconds,
-                        "stderr_tail": _tail(stderr_text),
-                        "cmd": cmd,
-                        "workdir": cwd,
-                        "resolved_data_dir_arg": data_dir_arg,
-                        "resolved_data_dir_fs": data_dir_fs,
-                        "impl_version": "2026-03-09-r5",
+                        "genome": genome,
+                        "data_dir": data_dir_fs,
+                        "expected_genome_dir": expected_genome_dir,
+                        "expected_db_file": expected_db_file,
+                        "hint": (
+                            f'Download the database first, e.g. '
+                            f'java -jar "{jar_path}" download -v -dataDir "{data_dir_fs}" {genome}'
+                        ),
                     }
+                    logger.warning(
+                        "SnpEff enabled but genome database missing for run_id=%s genome=%s expected_db_file=%s",
+                        run_id,
+                        genome,
+                        expected_db_file,
+                    )
                     conn.execute("BEGIN IMMEDIATE")
                     mark_stage_failed(
                         db_path,
                         run_id,
                         "annotation",
                         input_uploaded_at=uploaded_at,
-                        error_code="SNPEFF_TIMEOUT",
-                        error_message=f"SnpEff timed out after {timeout_seconds} seconds.",
+                        error_code="SNPEFF_DB_MISSING",
+                        error_message="SnpEff genome database is missing. Download it before running annotation.",
                         error_details=details,
                         conn=conn,
                         commit=False,
@@ -481,39 +489,516 @@ def run_annotation_stage(
                     conn.commit()
                     raise StageExecutionError(
                         500,
-                        "SNPEFF_TIMEOUT",
-                        f"SnpEff timed out after {timeout_seconds} seconds.",
-                        details={"timeout_seconds": timeout_seconds},
+                        "SNPEFF_DB_MISSING",
+                        "SnpEff genome database is missing. Download it before running annotation.",
+                        details=details,
                     )
 
-            stats["snpeff_exit_code"] = int(completed.returncode)
-            stderr_text = (completed.stderr or b"").decode("utf-8", errors="replace")
-            if stderr_text:
-                stats["snpeff_stderr_tail"] = _tail(stderr_text)
+                artifacts_dir = ensure_run_artifacts_dir(db_path, run_id)
+                input_vcf_path = os.path.join(artifacts_dir, "snpeff.input.vcf")
+                output_vcf_path = os.path.join(artifacts_dir, "snpeff.annotated.vcf")
 
-            if completed.returncode != 0:
+                variants_written = _write_minimal_vcf_fast(conn, run_id, input_vcf_path)
+                timeout_seconds = int(config.get("timeout_seconds") or 900)
+                stats["input_vcf_path"] = input_vcf_path
+                stats["output_vcf_path"] = output_vcf_path
+                stats["variants_written"] = variants_written
+                stats["snpeff_configured"] = True
+                stats["workdir"] = workdir
+                stats["data_dir"] = data_dir_fs
+                stats["data_dir_arg"] = data_dir_arg
+                stats["timeout_seconds"] = timeout_seconds
+
+                if os.name == "nt":
+                    cmd_data_dir = data_dir_arg
+                    cmd_cwd = workdir
+                else:
+                    cmd_data_dir = data_dir_fs
+                    cmd_cwd = artifacts_dir
+                stats["command_workdir"] = cmd_cwd
+                stats["command_data_dir"] = cmd_data_dir
+
+                java_cmd = config.get("java_cmd") or "java"
+                java_xmx = config.get("java_xmx") or "2g"
+                extra_args = list(config.get("extra_args") or [])
+
+                cmd: list[str] = [
+                    java_cmd,
+                    f"-Xmx{java_xmx}",
+                    "-jar",
+                    jar_path,
+                ]
+                if config.get("config_path"):
+                    cmd.extend(["-c", config["config_path"]])
+                if cmd_data_dir:
+                    cmd.extend(["-dataDir", cmd_data_dir])
+                cmd.extend(extra_args)
+                cmd.extend([genome, input_vcf_path])
+
+                cwd = cmd_cwd
+                os.makedirs(os.path.dirname(output_vcf_path), exist_ok=True)
+                with open(output_vcf_path, "wb") as out_f:
+                    try:
+                        completed = subprocess.run(
+                            cmd,
+                            cwd=cwd or None,
+                            stdout=out_f,
+                            stderr=subprocess.PIPE,
+                            check=False,
+                            timeout=timeout_seconds,
+                        )
+                    except subprocess.TimeoutExpired as exc:
+                        stderr_raw = exc.stderr
+                        if isinstance(stderr_raw, bytes):
+                            stderr_text = stderr_raw.decode("utf-8", errors="replace")
+                        else:
+                            stderr_text = stderr_raw or ""
+                        details = {
+                            "timeout_seconds": timeout_seconds,
+                            "stderr_tail": _tail(stderr_text),
+                            "cmd": cmd,
+                            "workdir": cwd,
+                            "resolved_data_dir_arg": data_dir_arg,
+                            "resolved_data_dir_fs": data_dir_fs,
+                            "impl_version": "2026-03-09-r6",
+                        }
+                        conn.execute("BEGIN IMMEDIATE")
+                        mark_stage_failed(
+                            db_path,
+                            run_id,
+                            "annotation",
+                            input_uploaded_at=uploaded_at,
+                            error_code="SNPEFF_TIMEOUT",
+                            error_message=f"SnpEff timed out after {timeout_seconds} seconds.",
+                            error_details=details,
+                            conn=conn,
+                            commit=False,
+                        )
+                        conn.commit()
+                        raise StageExecutionError(
+                            500,
+                            "SNPEFF_TIMEOUT",
+                            f"SnpEff timed out after {timeout_seconds} seconds.",
+                            details={"timeout_seconds": timeout_seconds},
+                        )
+
+                stats["snpeff_exit_code"] = int(completed.returncode)
+                stderr_text = (completed.stderr or b"").decode("utf-8", errors="replace")
+                if stderr_text:
+                    stats["snpeff_stderr_tail"] = _tail(stderr_text)
+
+                if completed.returncode != 0:
+                    conn.execute("BEGIN IMMEDIATE")
+                    mark_stage_failed(
+                        db_path,
+                        run_id,
+                        "annotation",
+                        input_uploaded_at=uploaded_at,
+                        error_code="SNPEFF_FAILED",
+                        error_message="SnpEff execution failed.",
+                        error_details={
+                            "exit_code": completed.returncode,
+                            "stderr_tail": _tail(stderr_text),
+                            "cmd": cmd,
+                            "workdir": cwd,
+                            "resolved_data_dir_arg": data_dir_arg,
+                            "resolved_data_dir_fs": data_dir_fs,
+                            "impl_version": "2026-03-09-r6",
+                        },
+                        conn=conn,
+                        commit=False,
+                    )
+                    conn.commit()
+                    raise StageExecutionError(500, "SNPEFF_FAILED", "SnpEff execution failed.")
+            else:
+                stats["snpeff_note"] = "SnpEff is disabled (SP_SNPEFF_ENABLED=0)."
+
+            dbsnp_config = _dbsnp_config(reference_build)
+            stats["dbsnp_enabled"] = bool(dbsnp_config.enabled)
+            stats["dbsnp_timeout_seconds"] = int(dbsnp_config.timeout_seconds)
+            stats["dbsnp_retry_max_attempts"] = int(dbsnp_config.retry_max_attempts)
+            stats["dbsnp_retry_backoff_base_seconds"] = float(dbsnp_config.retry_backoff_base_seconds)
+            stats["dbsnp_retry_backoff_max_seconds"] = float(dbsnp_config.retry_backoff_max_seconds)
+            stats["dbsnp_assembly"] = str(dbsnp_config.assembly)
+
+            variants = list(iter_variants_for_run_with_ids(db_path, run_id, conn=conn))
+            stats["dbsnp_variants_processed"] = len(variants)
+            dbsnp_rows: list[dict] = []
+            dbsnp_errors: list[dict] = []
+            dbsnp_error_reason_counts: dict[str, int] = {}
+            dbsnp_error_http_status_counts: dict[str, int] = {}
+            dbsnp_retry_attempts_total = 0
+            dbsnp_found_count = 0
+            dbsnp_not_found_count = 0
+
+            if dbsnp_config.enabled:
+                for variant in variants:
+                    if _get_run_status(conn, run_id) == "canceled":
+                        conn.execute("BEGIN IMMEDIATE")
+                        clear_dbsnp_evidence_for_run(db_path, run_id, conn=conn, commit=False)
+                        clear_clinvar_evidence_for_run(db_path, run_id, conn=conn, commit=False)
+                        mark_stage_canceled(
+                            db_path,
+                            run_id,
+                            "annotation",
+                            input_uploaded_at=uploaded_at,
+                            conn=conn,
+                            commit=False,
+                        )
+                        conn.commit()
+                        raise StageExecutionError(409, "RUN_CANCELED", "Run was canceled.")
+
+                    result = fetch_dbsnp_evidence_for_variant(
+                        dbsnp_config,
+                        chrom=str(variant.get("chrom") or ""),
+                        pos=int(variant.get("pos") or 0),
+                        ref=str(variant.get("ref") or ""),
+                        alt=str(variant.get("alt") or ""),
+                    )
+                    retries_used = int(result.get("retry_attempts") or 0)
+                    dbsnp_retry_attempts_total += retries_used
+                    outcome = str(result.get("outcome") or "error")
+                    if outcome == "found":
+                        dbsnp_found_count += 1
+                    elif outcome == "not_found":
+                        dbsnp_not_found_count += 1
+                    else:
+                        reason_code = str(result.get("reason_code") or "UNKNOWN_ERROR")
+                        dbsnp_error_reason_counts[reason_code] = dbsnp_error_reason_counts.get(reason_code, 0) + 1
+                        result_details = result.get("details") or {}
+                        status_code = result_details.get("status_code")
+                        if status_code is not None:
+                            status_key = str(status_code)
+                            dbsnp_error_http_status_counts[status_key] = (
+                                dbsnp_error_http_status_counts.get(status_key, 0) + 1
+                            )
+                        dbsnp_errors.append(
+                            {
+                                "variant_id": variant.get("variant_id"),
+                                "variant_key": _variant_key(variant),
+                                "reason_code": reason_code,
+                                "reason_message": result.get("reason_message"),
+                                "details": result_details,
+                            }
+                        )
+
+                    dbsnp_rows.append(
+                        {
+                            "variant_id": variant["variant_id"],
+                            "source": "dbsnp",
+                            "outcome": outcome,
+                            "rsid": result.get("rsid"),
+                            "reason_code": result.get("reason_code"),
+                            "reason_message": result.get("reason_message"),
+                            "details": result.get("details") or {},
+                            "retrieved_at": result.get("retrieved_at") or created_at,
+                        }
+                    )
+
+                stats["dbsnp_retry_attempts"] = dbsnp_retry_attempts_total
+                stats["dbsnp_found"] = dbsnp_found_count
+                stats["dbsnp_not_found"] = dbsnp_not_found_count
+                stats["dbsnp_errors"] = len(dbsnp_errors)
+                stats["dbsnp_error_reason_counts"] = dbsnp_error_reason_counts
+                stats["dbsnp_error_http_status_counts"] = dbsnp_error_http_status_counts
+
+                if dbsnp_errors:
+                    details = {
+                        "errors": dbsnp_errors[:10],
+                        "error_count": len(dbsnp_errors),
+                        "timeout_seconds": int(dbsnp_config.timeout_seconds),
+                        "retry_max_attempts": int(dbsnp_config.retry_max_attempts),
+                        "retry_attempts_total": dbsnp_retry_attempts_total,
+                        "hint": "Check dbSNP network connectivity/API availability and retry settings.",
+                    }
+                    stats["dbsnp_error_details"] = details
+                    stats["dbsnp_warning"] = "dbSNP retrieval had one or more errors."
+                    if fail_on_evidence_error:
+                        conn.execute("BEGIN IMMEDIATE")
+                        clear_dbsnp_evidence_for_run(db_path, run_id, conn=conn, commit=False)
+                        clear_clinvar_evidence_for_run(db_path, run_id, conn=conn, commit=False)
+                        mark_stage_failed(
+                            db_path,
+                            run_id,
+                            "annotation",
+                            input_uploaded_at=uploaded_at,
+                            error_code="DBSNP_RETRIEVAL_FAILED",
+                            error_message="dbSNP retrieval failed for one or more variants.",
+                            error_details=details,
+                            conn=conn,
+                            commit=False,
+                        )
+                        conn.commit()
+                        raise StageExecutionError(
+                            500,
+                            "DBSNP_RETRIEVAL_FAILED",
+                            "dbSNP retrieval failed for one or more variants.",
+                            details=details,
+                        )
+
                 conn.execute("BEGIN IMMEDIATE")
-                mark_stage_failed(
-                    db_path,
-                    run_id,
-                    "annotation",
-                    input_uploaded_at=uploaded_at,
-                    error_code="SNPEFF_FAILED",
-                    error_message="SnpEff execution failed.",
-                    error_details={
-                        "exit_code": completed.returncode,
-                        "stderr_tail": _tail(stderr_text),
-                        "cmd": cmd,
-                        "workdir": cwd,
-                        "resolved_data_dir_arg": data_dir_arg,
-                        "resolved_data_dir_fs": data_dir_fs,
-                        "impl_version": "2026-03-09-r5",
-                    },
-                    conn=conn,
-                    commit=False,
-                )
+                upsert_dbsnp_evidence_for_run(db_path, run_id, dbsnp_rows, conn=conn, commit=False)
                 conn.commit()
-                raise StageExecutionError(500, "SNPEFF_FAILED", "SnpEff execution failed.")
+            else:
+                stats["dbsnp_note"] = "dbSNP retrieval is disabled (SP_DBSNP_ENABLED=0)."
+                stats["dbsnp_retry_attempts"] = 0
+                stats["dbsnp_found"] = 0
+                stats["dbsnp_not_found"] = 0
+                stats["dbsnp_errors"] = 0
+                stats["dbsnp_error_reason_counts"] = {}
+                stats["dbsnp_error_http_status_counts"] = {}
+
+            clinvar_config = _clinvar_config()
+            stats["clinvar_enabled"] = bool(clinvar_config.enabled)
+            stats["clinvar_timeout_seconds"] = int(clinvar_config.timeout_seconds)
+            stats["clinvar_retry_max_attempts"] = int(clinvar_config.retry_max_attempts)
+            stats["clinvar_retry_backoff_base_seconds"] = float(clinvar_config.retry_backoff_base_seconds)
+            stats["clinvar_retry_backoff_max_seconds"] = float(clinvar_config.retry_backoff_max_seconds)
+            stats["clinvar_variants_processed"] = len(variants)
+
+            clinvar_rows: list[dict] = []
+            clinvar_errors: list[dict] = []
+            clinvar_error_reason_counts: dict[str, int] = {}
+            clinvar_error_http_status_counts: dict[str, int] = {}
+            clinvar_retry_attempts_total = 0
+            clinvar_found_count = 0
+            clinvar_not_found_count = 0
+
+            if clinvar_config.enabled:
+                for variant in variants:
+                    if _get_run_status(conn, run_id) == "canceled":
+                        conn.execute("BEGIN IMMEDIATE")
+                        clear_dbsnp_evidence_for_run(db_path, run_id, conn=conn, commit=False)
+                        clear_clinvar_evidence_for_run(db_path, run_id, conn=conn, commit=False)
+                        mark_stage_canceled(
+                            db_path,
+                            run_id,
+                            "annotation",
+                            input_uploaded_at=uploaded_at,
+                            conn=conn,
+                            commit=False,
+                        )
+                        conn.commit()
+                        raise StageExecutionError(409, "RUN_CANCELED", "Run was canceled.")
+
+                    result = fetch_clinvar_evidence_for_variant(
+                        clinvar_config,
+                        chrom=str(variant.get("chrom") or ""),
+                        pos=int(variant.get("pos") or 0),
+                        ref=str(variant.get("ref") or ""),
+                        alt=str(variant.get("alt") or ""),
+                    )
+                    retries_used = int(result.get("retry_attempts") or 0)
+                    clinvar_retry_attempts_total += retries_used
+                    outcome = str(result.get("outcome") or "error")
+                    if outcome == "found":
+                        clinvar_found_count += 1
+                    elif outcome == "not_found":
+                        clinvar_not_found_count += 1
+                    else:
+                        reason_code = str(result.get("reason_code") or "UNKNOWN_ERROR")
+                        clinvar_error_reason_counts[reason_code] = clinvar_error_reason_counts.get(reason_code, 0) + 1
+                        result_details = result.get("details") or {}
+                        status_code = result_details.get("status_code")
+                        if status_code is not None:
+                            status_key = str(status_code)
+                            clinvar_error_http_status_counts[status_key] = (
+                                clinvar_error_http_status_counts.get(status_key, 0) + 1
+                            )
+                        clinvar_errors.append(
+                            {
+                                "variant_id": variant.get("variant_id"),
+                                "variant_key": _variant_key(variant),
+                                "reason_code": reason_code,
+                                "reason_message": result.get("reason_message"),
+                                "details": result_details,
+                            }
+                        )
+
+                    clinvar_rows.append(
+                        {
+                            "variant_id": variant["variant_id"],
+                            "source": "clinvar",
+                            "outcome": outcome,
+                            "clinvar_id": result.get("clinvar_id"),
+                            "clinical_significance": result.get("clinical_significance"),
+                            "reason_code": result.get("reason_code"),
+                            "reason_message": result.get("reason_message"),
+                            "details": result.get("details") or {},
+                            "retrieved_at": result.get("retrieved_at") or created_at,
+                        }
+                    )
+
+                stats["clinvar_retry_attempts"] = clinvar_retry_attempts_total
+                stats["clinvar_found"] = clinvar_found_count
+                stats["clinvar_not_found"] = clinvar_not_found_count
+                stats["clinvar_errors"] = len(clinvar_errors)
+                stats["clinvar_error_reason_counts"] = clinvar_error_reason_counts
+                stats["clinvar_error_http_status_counts"] = clinvar_error_http_status_counts
+
+                if clinvar_errors:
+                    details = {
+                        "errors": clinvar_errors[:10],
+                        "error_count": len(clinvar_errors),
+                        "timeout_seconds": int(clinvar_config.timeout_seconds),
+                        "retry_max_attempts": int(clinvar_config.retry_max_attempts),
+                        "retry_attempts_total": clinvar_retry_attempts_total,
+                        "hint": "Check ClinVar network connectivity/API availability and retry settings.",
+                    }
+                    stats["clinvar_error_details"] = details
+                    stats["clinvar_warning"] = "ClinVar retrieval had one or more errors."
+                    if fail_on_evidence_error:
+                        conn.execute("BEGIN IMMEDIATE")
+                        clear_dbsnp_evidence_for_run(db_path, run_id, conn=conn, commit=False)
+                        clear_clinvar_evidence_for_run(db_path, run_id, conn=conn, commit=False)
+                        mark_stage_failed(
+                            db_path,
+                            run_id,
+                            "annotation",
+                            input_uploaded_at=uploaded_at,
+                            error_code="CLINVAR_RETRIEVAL_FAILED",
+                            error_message="ClinVar retrieval failed for one or more variants.",
+                            error_details=details,
+                            conn=conn,
+                            commit=False,
+                        )
+                        conn.commit()
+                        raise StageExecutionError(
+                            500,
+                            "CLINVAR_RETRIEVAL_FAILED",
+                            "ClinVar retrieval failed for one or more variants.",
+                            details=details,
+                        )
+
+                conn.execute("BEGIN IMMEDIATE")
+                upsert_clinvar_evidence_for_run(db_path, run_id, clinvar_rows, conn=conn, commit=False)
+                conn.commit()
+            else:
+                stats["clinvar_note"] = "ClinVar retrieval is disabled (SP_CLINVAR_ENABLED=0)."
+                stats["clinvar_retry_attempts"] = 0
+                stats["clinvar_found"] = 0
+                stats["clinvar_not_found"] = 0
+                stats["clinvar_errors"] = 0
+                stats["clinvar_error_reason_counts"] = {}
+                stats["clinvar_error_http_status_counts"] = {}
+
+            gnomad_config = _gnomad_config()
+            stats["gnomad_enabled"] = bool(gnomad_config.enabled)
+            stats["gnomad_timeout_seconds"] = int(gnomad_config.timeout_seconds)
+            stats["gnomad_retry_max_attempts"] = int(gnomad_config.retry_max_attempts)
+            stats["gnomad_retry_backoff_base_seconds"] = float(gnomad_config.retry_backoff_base_seconds)
+            stats["gnomad_retry_backoff_max_seconds"] = float(gnomad_config.retry_backoff_max_seconds)
+            stats["gnomad_min_request_interval_seconds"] = float(gnomad_config.min_request_interval_seconds)
+            stats["gnomad_dataset_id"] = gnomad_config.dataset_id
+            stats["gnomad_reference_genome"] = gnomad_config.reference_genome
+            stats["gnomad_variants_processed"] = len(variants)
+
+            gnomad_errors: list[dict] = []
+            gnomad_error_reason_counts: dict[str, int] = {}
+            gnomad_error_http_status_counts: dict[str, int] = {}
+            gnomad_retry_attempts_total = 0
+            gnomad_found_count = 0
+            gnomad_not_found_count = 0
+
+            if gnomad_config.enabled:
+                for variant in variants:
+                    if _get_run_status(conn, run_id) == "canceled":
+                        conn.execute("BEGIN IMMEDIATE")
+                        clear_dbsnp_evidence_for_run(db_path, run_id, conn=conn, commit=False)
+                        clear_clinvar_evidence_for_run(db_path, run_id, conn=conn, commit=False)
+                        mark_stage_canceled(
+                            db_path,
+                            run_id,
+                            "annotation",
+                            input_uploaded_at=uploaded_at,
+                            conn=conn,
+                            commit=False,
+                        )
+                        conn.commit()
+                        raise StageExecutionError(409, "RUN_CANCELED", "Run was canceled.")
+
+                    result = fetch_gnomad_evidence_for_variant(
+                        gnomad_config,
+                        chrom=str(variant.get("chrom") or ""),
+                        pos=int(variant.get("pos") or 0),
+                        ref=str(variant.get("ref") or ""),
+                        alt=str(variant.get("alt") or ""),
+                    )
+                    retries_used = int(result.get("retry_attempts") or 0)
+                    gnomad_retry_attempts_total += retries_used
+                    outcome = str(result.get("outcome") or "error")
+                    if outcome == "found":
+                        gnomad_found_count += 1
+                    elif outcome == "not_found":
+                        gnomad_not_found_count += 1
+                    else:
+                        reason_code = str(result.get("reason_code") or "UNKNOWN_ERROR")
+                        gnomad_error_reason_counts[reason_code] = gnomad_error_reason_counts.get(reason_code, 0) + 1
+                        result_details = result.get("details") or {}
+                        status_code = result_details.get("status_code")
+                        if status_code is not None:
+                            status_key = str(status_code)
+                            gnomad_error_http_status_counts[status_key] = (
+                                gnomad_error_http_status_counts.get(status_key, 0) + 1
+                            )
+                        gnomad_errors.append(
+                            {
+                                "variant_id": variant.get("variant_id"),
+                                "variant_key": _variant_key(variant),
+                                "reason_code": reason_code,
+                                "reason_message": result.get("reason_message"),
+                                "details": result_details,
+                            }
+                        )
+
+                stats["gnomad_retry_attempts"] = gnomad_retry_attempts_total
+                stats["gnomad_found"] = gnomad_found_count
+                stats["gnomad_not_found"] = gnomad_not_found_count
+                stats["gnomad_errors"] = len(gnomad_errors)
+                stats["gnomad_error_reason_counts"] = gnomad_error_reason_counts
+                stats["gnomad_error_http_status_counts"] = gnomad_error_http_status_counts
+
+                if gnomad_errors:
+                    details = {
+                        "errors": gnomad_errors[:10],
+                        "error_count": len(gnomad_errors),
+                        "timeout_seconds": int(gnomad_config.timeout_seconds),
+                        "retry_max_attempts": int(gnomad_config.retry_max_attempts),
+                        "retry_attempts_total": gnomad_retry_attempts_total,
+                        "hint": "Check gnomAD network connectivity/API availability and retry settings.",
+                    }
+                    stats["gnomad_error_details"] = details
+                    stats["gnomad_warning"] = "gnomAD retrieval had one or more errors."
+                    if fail_on_evidence_error:
+                        conn.execute("BEGIN IMMEDIATE")
+                        clear_dbsnp_evidence_for_run(db_path, run_id, conn=conn, commit=False)
+                        clear_clinvar_evidence_for_run(db_path, run_id, conn=conn, commit=False)
+                        mark_stage_failed(
+                            db_path,
+                            run_id,
+                            "annotation",
+                            input_uploaded_at=uploaded_at,
+                            error_code="GNOMAD_RETRIEVAL_FAILED",
+                            error_message="gnomAD retrieval failed for one or more variants.",
+                            error_details=details,
+                            conn=conn,
+                            commit=False,
+                        )
+                        conn.commit()
+                        raise StageExecutionError(
+                            500,
+                            "GNOMAD_RETRIEVAL_FAILED",
+                            "gnomAD retrieval failed for one or more variants.",
+                            details=details,
+                        )
+            else:
+                stats["gnomad_note"] = "gnomAD retrieval is disabled (SP_GNOMAD_ENABLED=0)."
+                stats["gnomad_retry_attempts"] = 0
+                stats["gnomad_found"] = 0
+                stats["gnomad_not_found"] = 0
+                stats["gnomad_errors"] = 0
+                stats["gnomad_error_reason_counts"] = {}
+                stats["gnomad_error_http_status_counts"] = {}
 
             conn.execute("BEGIN IMMEDIATE")
             mark_stage_succeeded(
@@ -537,6 +1022,8 @@ def run_annotation_stage(
             try:
                 _init_schema(conn)
                 conn.execute("BEGIN IMMEDIATE")
+                clear_dbsnp_evidence_for_run(db_path, run_id, conn=conn, commit=False)
+                clear_clinvar_evidence_for_run(db_path, run_id, conn=conn, commit=False)
                 mark_stage_failed(
                     db_path,
                     run_id,

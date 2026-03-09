@@ -131,6 +131,80 @@ class PredictionStageTestCase(unittest.TestCase):
             self.assertAlmostEqual(by_key["polyphen2"]["score"], 0.99, places=6)
             self.assertAlmostEqual(by_key["alphamissense"]["score"], 0.87, places=6)
 
+    def test_prediction_maps_nested_alphamissense_payload_for_missense(self):
+        from pipeline.prediction_stage import run_prediction_stage  # noqa: E402
+        from storage.predictor_outputs import list_predictor_outputs_for_run  # noqa: E402
+
+        uploaded_at = "2026-03-09T00:00:00+00:00"
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = os.path.join(tmpdir, "sp.db")
+            run_id = self._seed_ready_run(db_path, uploaded_at, category="missense")
+
+            cache_dir = os.path.join(tmpdir, "vep-cache")
+            os.makedirs(cache_dir, exist_ok=True)
+            alpha_file = os.path.join(tmpdir, "alphamissense.tsv.gz")
+            with open(alpha_file, "w", encoding="utf-8") as f:
+                f.write("placeholder\n")
+            with open(f"{alpha_file}.tbi", "w", encoding="utf-8") as f:
+                f.write("placeholder-index\n")
+
+            def fake_run(cmd, cwd, stdout, stderr, check, timeout):
+                del cwd, stdout, stderr, check, timeout
+                payload = {
+                    "seq_region_name": "1",
+                    "start": 1,
+                    "allele_string": "A/G",
+                    "transcript_consequences": [
+                        {
+                            "sift_prediction": "deleterious",
+                            "sift_score": 0.01,
+                            "polyphen_prediction": "probably_damaging",
+                            "polyphen_score": 0.99,
+                            "alphamissense": {
+                                "am_pathogenicity": 0.8753,
+                                "am_class": "likely_pathogenic",
+                            },
+                        }
+                    ],
+                }
+                output_path = cmd[cmd.index("--output_file") + 1]
+                with open(output_path, "w", encoding="utf-8", newline="\n") as out_f:
+                    out_f.write(json.dumps(payload) + "\n")
+
+                class Completed:
+                    returncode = 0
+                    stderr = b""
+                    stdout = b""
+
+                return Completed()
+
+            with patch.dict(
+                os.environ,
+                {
+                    "SP_VEP_CMD": "vep",
+                    "SP_VEP_CACHE_DIR": cache_dir,
+                    "SP_VEP_ALPHAMISSENSE_FILE": alpha_file,
+                    "SP_VEP_TIMEOUT_SECONDS": "30",
+                },
+                clear=False,
+            ):
+                with patch("pipeline.prediction_stage.subprocess.run", side_effect=fake_run):
+                    result = run_prediction_stage(
+                        db_path,
+                        run_id,
+                        uploaded_at=uploaded_at,
+                        logger=logging.getLogger("test"),
+                        force=False,
+                    )
+
+            self.assertEqual(result["prediction"]["status"], "succeeded")
+            rows = list_predictor_outputs_for_run(db_path, run_id, limit=10)
+            self.assertEqual(len(rows), 3)
+            by_key = {row["predictor_key"]: row for row in rows}
+            self.assertEqual(by_key["alphamissense"]["outcome"], "computed")
+            self.assertAlmostEqual(by_key["alphamissense"]["score"], 0.8753, places=6)
+            self.assertEqual(by_key["alphamissense"]["label"], "likely_pathogenic")
+
     def test_prediction_marks_non_missense_as_not_applicable(self):
         from pipeline.prediction_stage import run_prediction_stage  # noqa: E402
         from storage.predictor_outputs import list_predictor_outputs_for_run  # noqa: E402
@@ -202,10 +276,113 @@ class PredictionStageTestCase(unittest.TestCase):
                 self.assertIsNone(row["score"])
                 self.assertIsNone(row["label"])
 
+    def test_prediction_skips_other_category_without_invoking_vep(self):
+        from pipeline.prediction_stage import run_prediction_stage  # noqa: E402
+        from storage.predictor_outputs import list_predictor_outputs_for_run  # noqa: E402
+
+        uploaded_at = "2026-03-09T00:00:00+00:00"
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = os.path.join(tmpdir, "sp.db")
+            run_id = self._seed_ready_run(db_path, uploaded_at, category="other")
+
+            with patch.dict(
+                os.environ,
+                {
+                    "SP_VEP_CMD": "",
+                    "SP_VEP_CACHE_DIR": "",
+                    "SP_VEP_ALPHAMISSENSE_FILE": "",
+                },
+                clear=False,
+            ):
+                with patch("pipeline.prediction_stage.subprocess.run") as mock_subprocess:
+                    result = run_prediction_stage(
+                        db_path,
+                        run_id,
+                        uploaded_at=uploaded_at,
+                        logger=logging.getLogger("test"),
+                        force=False,
+                    )
+
+            self.assertEqual(result["prediction"]["status"], "succeeded")
+            self.assertEqual(result["prediction"]["stats"]["predictors_executed"], [])
+            self.assertEqual(result["prediction"]["stats"]["variants_sent_to_vep"], 0)
+            self.assertEqual(result["prediction"]["stats"]["variants_skipped_other"], 1)
+            self.assertEqual(list_predictor_outputs_for_run(db_path, run_id, limit=10), [])
+            mock_subprocess.assert_not_called()
+
     def test_prediction_module_does_not_expose_mvp_placeholder_generator(self):
         import pipeline.prediction_stage as pred  # noqa: E402
 
         self.assertFalse(hasattr(pred, "_make_mvp_output"))
+
+    def test_prediction_fails_when_alphamissense_missing_for_all_missense(self):
+        from pipeline.parser_stage import StageExecutionError  # noqa: E402
+        from pipeline.prediction_stage import run_prediction_stage  # noqa: E402
+        from storage.predictor_outputs import list_predictor_outputs_for_run  # noqa: E402
+        from storage.stages import get_stage  # noqa: E402
+
+        uploaded_at = "2026-03-09T00:00:00+00:00"
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = os.path.join(tmpdir, "sp.db")
+            run_id = self._seed_ready_run(db_path, uploaded_at, category="missense")
+
+            cache_dir = os.path.join(tmpdir, "vep-cache")
+            os.makedirs(cache_dir, exist_ok=True)
+            alpha_file = os.path.join(tmpdir, "alphamissense.tsv")
+            with open(alpha_file, "w", encoding="utf-8") as f:
+                f.write("placeholder\n")
+
+            def fake_run(cmd, cwd, stdout, stderr, check, timeout):
+                del cwd, stdout, stderr, check, timeout
+                payload = {
+                    "seq_region_name": "1",
+                    "start": 1,
+                    "allele_string": "A/G",
+                    "transcript_consequences": [
+                        {
+                            "sift_prediction": "deleterious",
+                            "sift_score": 0.01,
+                            "polyphen_prediction": "probably_damaging",
+                            "polyphen_score": 0.99,
+                        }
+                    ],
+                }
+                output_path = cmd[cmd.index("--output_file") + 1]
+                with open(output_path, "w", encoding="utf-8", newline="\n") as out_f:
+                    out_f.write(json.dumps(payload) + "\n")
+
+                class Completed:
+                    returncode = 0
+                    stderr = b""
+                    stdout = b""
+
+                return Completed()
+
+            with patch.dict(
+                os.environ,
+                {
+                    "SP_VEP_CMD": "vep",
+                    "SP_VEP_CACHE_DIR": cache_dir,
+                    "SP_VEP_ALPHAMISSENSE_FILE": alpha_file,
+                    "SP_VEP_TIMEOUT_SECONDS": "30",
+                },
+                clear=False,
+            ):
+                with patch("pipeline.prediction_stage.subprocess.run", side_effect=fake_run):
+                    with self.assertRaises(StageExecutionError) as raised:
+                        run_prediction_stage(
+                            db_path,
+                            run_id,
+                            uploaded_at=uploaded_at,
+                            logger=logging.getLogger("test"),
+                            force=False,
+                        )
+
+            self.assertEqual(raised.exception.code, "ALPHAMISSENSE_NOT_AVAILABLE")
+            stage = get_stage(db_path, run_id, "prediction") or {}
+            self.assertEqual(stage.get("status"), "failed")
+            self.assertEqual((stage.get("error") or {}).get("code"), "ALPHAMISSENSE_NOT_AVAILABLE")
+            self.assertEqual(list_predictor_outputs_for_run(db_path, run_id, limit=10), [])
 
     def test_prediction_fails_with_actionable_error_when_config_missing(self):
         from pipeline.parser_stage import StageExecutionError  # noqa: E402
@@ -334,7 +511,12 @@ class PredictionStageTestCase(unittest.TestCase):
                     "start": 1,
                     "allele_string": "A/G",
                     "transcript_consequences": [
-                        {"sift_prediction": "deleterious", "sift_score": 0.01}
+                        {
+                            "sift_prediction": "deleterious",
+                            "sift_score": 0.01,
+                            "am_pathogenicity": 0.87,
+                            "am_class": "likely_pathogenic",
+                        }
                     ],
                 }
                 output_path = cmd[cmd.index("--output_file") + 1]

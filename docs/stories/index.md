@@ -26,3 +26,15 @@ For the current annotation and prediction integration work, start with:
 - `_bmad-output/implementation-artifacts/6-1-retrieve-dbsnp-identifiersevidence-and-persist-results-per-variant.md`
 - `_bmad-output/implementation-artifacts/9-5-automate-first-run-snpeff-setup-and-runtime-configuration.md`
 - `_bmad-output/implementation-artifacts/9-6-automate-first-run-vep-and-alphamissense-setup-and-runtime-configuration.md`
+
+## Mandatory Integration Documentation
+
+For every new tool/feature integration story:
+
+1. Update `docs/integration-contracts.md` with:
+   - integration point and story key
+   - exact request/command format
+   - input contract
+   - output contract (artifact/DB/API)
+   - failure/retry/timeout behavior
+2. Use `docs/templates/integration-entry-template.md` for new entries.

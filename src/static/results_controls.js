@@ -14,9 +14,13 @@
   const predMessageEl = document.getElementById("prediction-results-message");
   const predTableEl = document.getElementById("prediction-results-table");
   const predBodyEl = document.getElementById("prediction-results-body");
+  const predShowNotApplicableEl = document.getElementById("prediction-show-not-applicable");
 
   const annotationMessageEl = document.getElementById("annotation-results-message");
   const annotationSummaryEl = document.getElementById("annotation-results-summary");
+  const annotationDiagnosticsMessageEl = document.getElementById("annotation-diagnostics-message");
+  const annotationDiagnosticsTableEl = document.getElementById("annotation-diagnostics-table");
+  const annotationDiagnosticsBodyEl = document.getElementById("annotation-diagnostics-body");
   const annotationVcfMessageEl = document.getElementById("annotation-vcf-message");
   const annotationVcfTableEl = document.getElementById("annotation-vcf-table");
   const annotationVcfHeadRowEl = document.getElementById("annotation-vcf-head-row");
@@ -74,6 +78,9 @@
     !predBodyEl ||
     !annotationMessageEl ||
     !annotationSummaryEl ||
+    !annotationDiagnosticsMessageEl ||
+    !annotationDiagnosticsTableEl ||
+    !annotationDiagnosticsBodyEl ||
     !annotationVcfMessageEl ||
     !annotationVcfTableEl ||
     !annotationVcfHeadRowEl ||
@@ -92,6 +99,15 @@
   let refreshTimerId = null;
   let pausePolling = false;
   let lastTriggerEl = null;
+  let cachedPredictionRows = [];
+  const dateTimeFormatter = new Intl.DateTimeFormat("en-US", {
+    month: "2-digit",
+    day: "2-digit",
+    year: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+  });
 
   function clearEl(el) {
     while (el.firstChild) el.removeChild(el.firstChild);
@@ -111,6 +127,13 @@
     el.appendChild(span);
   }
 
+  function formatDateTime(value) {
+    if (!value) return "\u2014";
+    const d = new Date(value);
+    if (Number.isNaN(d.getTime())) return String(value);
+    return dateTimeFormatter.format(d);
+  }
+
   function hideTable(tableEl, bodyEl) {
     tableEl.hidden = true;
     clearEl(bodyEl);
@@ -120,6 +143,11 @@
     annotationVcfTableEl.hidden = true;
     clearEl(annotationVcfHeadRowEl);
     clearEl(annotationVcfBodyEl);
+  }
+
+  function hideAnnotationDiagnosticsTable() {
+    annotationDiagnosticsTableEl.hidden = true;
+    clearEl(annotationDiagnosticsBodyEl);
   }
 
   function parseVcfPreviewLines(lines) {
@@ -298,6 +326,19 @@
     return 5000;
   }
 
+  function isTerminalPipelineSnapshot(stages) {
+    if (!Array.isArray(stages) || stages.length === 0) return false;
+    const hasRunning = stages.some((stage) => stage?.status === "running");
+    if (hasRunning) return false;
+    const hasFailedOrCanceled = stages.some((stage) => {
+      const status = stage?.status;
+      return status === "failed" || status === "canceled";
+    });
+    if (hasFailedOrCanceled) return true;
+    const reporting = stageByName(stages, "reporting");
+    return reporting?.status === "succeeded";
+  }
+
   function scheduleNextRefresh(ms) {
     if (refreshTimerId != null) {
       window.clearTimeout(refreshTimerId);
@@ -340,6 +381,8 @@
     hideTable(predTableEl, predBodyEl);
     setMessage(annotationMessageEl, "Annotation summary will appear after stage completion.");
     setSummaryRows(annotationSummaryEl, []);
+    setMessage(annotationDiagnosticsMessageEl, "Evidence diagnostics will appear after stage completion.");
+    hideAnnotationDiagnosticsTable();
     setMessage(annotationVcfMessageEl, "Annotated VCF preview will appear after stage completion.");
     hideAnnotationVcfTable();
     setMessage(reportingMessageEl, "Reporting summary will appear after stage completion.");
@@ -464,9 +507,64 @@
     clsTableEl.hidden = false;
   }
 
-  function renderPredictionRows(rows) {
+  function groupPredictionRows(rows) {
+    const grouped = new Map();
+    for (const row of rows || []) {
+      const key = `${row?.variant_id || ""}|${row?.variant_key || ""}`;
+      if (!grouped.has(key)) {
+        grouped.set(key, {
+          variant_id: row?.variant_id || null,
+          variant_key: row?.variant_key || "\u2014",
+          outputs: {},
+        });
+      }
+      const entry = grouped.get(key);
+      const predictorKey = row?.predictor_key || "";
+      if (predictorKey) {
+        entry.outputs[predictorKey] = row;
+      }
+    }
+    return Array.from(grouped.values());
+  }
+
+  function renderPredictorCell(td, output) {
+    if (!output) {
+      td.textContent = "\u2014";
+      return;
+    }
+    td.className = "small";
+
+    const outcome = document.createElement("div");
+    outcome.className = "fw-semibold text-nowrap";
+    outcome.textContent = output?.outcome || "\u2014";
+    td.appendChild(outcome);
+
+    if (output?.score != null) {
+      const score = document.createElement("div");
+      score.className = "text-secondary";
+      score.textContent = `score: ${output.score}`;
+      td.appendChild(score);
+    }
+    if (output?.label != null && output?.label !== "") {
+      const label = document.createElement("div");
+      label.className = "text-secondary";
+      label.textContent = `label: ${output.label}`;
+      td.appendChild(label);
+    }
+    if (output?.outcome !== "computed") {
+      const reason = output?.reason_message || output?.reason_code || "";
+      if (reason) {
+        const reasonEl = document.createElement("div");
+        reasonEl.className = "text-secondary";
+        reasonEl.textContent = reason;
+        td.appendChild(reasonEl);
+      }
+    }
+  }
+
+  function renderPredictionRows(variantRows) {
     clearEl(predBodyEl);
-    for (const row of rows) {
+    for (const row of variantRows) {
       const tr = document.createElement("tr");
 
       const variantCell = document.createElement("td");
@@ -474,33 +572,50 @@
       variantCell.textContent = row?.variant_key ?? "\u2014";
       tr.appendChild(variantCell);
 
-      const predictorCell = document.createElement("td");
-      predictorCell.className = "text-nowrap";
-      predictorCell.textContent = predictorLabel(row?.predictor_key);
-      tr.appendChild(predictorCell);
+      const siftCell = document.createElement("td");
+      renderPredictorCell(siftCell, row?.outputs?.sift || null);
+      tr.appendChild(siftCell);
 
-      const outcomeCell = document.createElement("td");
-      outcomeCell.className = "text-nowrap";
-      outcomeCell.textContent = row?.outcome ?? "\u2014";
-      tr.appendChild(outcomeCell);
+      const polyphenCell = document.createElement("td");
+      renderPredictorCell(polyphenCell, row?.outputs?.polyphen2 || null);
+      tr.appendChild(polyphenCell);
 
-      const scoreCell = document.createElement("td");
-      scoreCell.className = "text-nowrap";
-      scoreCell.textContent = row?.score != null ? String(row.score) : "\u2014";
-      tr.appendChild(scoreCell);
+      const alphaCell = document.createElement("td");
+      renderPredictorCell(alphaCell, row?.outputs?.alphamissense || null);
+      tr.appendChild(alphaCell);
 
-      const labelCell = document.createElement("td");
-      labelCell.className = "text-nowrap";
-      labelCell.textContent = row?.label != null && row?.label !== "" ? String(row.label) : "\u2014";
-      tr.appendChild(labelCell);
-
-      const reasonCell = document.createElement("td");
-      reasonCell.textContent = row?.reason_message || row?.reason_code || "\u2014";
-      tr.appendChild(reasonCell);
+      const notesCell = document.createElement("td");
+      const notes = [];
+      for (const key of ["sift", "polyphen2", "alphamissense"]) {
+        const output = row?.outputs?.[key];
+        if (!output) continue;
+        const reason = output?.reason_message || output?.reason_code;
+        if (!reason) continue;
+        notes.push(`${predictorLabel(key)}: ${reason}`);
+      }
+      notesCell.textContent = notes.length > 0 ? notes.join(" | ") : "\u2014";
+      tr.appendChild(notesCell);
 
       predBodyEl.appendChild(tr);
     }
     predTableEl.hidden = false;
+  }
+
+  function predictionRowsForDisplay(rows) {
+    const source = groupPredictionRows(Array.isArray(rows) ? rows : []);
+    if (predShowNotApplicableEl?.checked) {
+      return source;
+    }
+    return source.filter((row) => {
+      const outputs = row?.outputs || {};
+      const predictors = ["sift", "polyphen2", "alphamissense"];
+      for (const key of predictors) {
+        const out = outputs[key];
+        if (!out) return true;
+        if (String(out?.outcome || "") !== "not_applicable") return true;
+      }
+      return false;
+    });
   }
 
   function renderAnnotation(stage) {
@@ -508,6 +623,8 @@
     if (failed) {
       setMessage(annotationMessageEl, failed);
       setSummaryRows(annotationSummaryEl, []);
+      setMessage(annotationDiagnosticsMessageEl, "");
+      hideAnnotationDiagnosticsTable();
       setMessage(annotationVcfMessageEl, "");
       hideAnnotationVcfTable();
       return;
@@ -516,12 +633,27 @@
     if (!stage || stage.status !== "succeeded") {
       setMessage(annotationMessageEl, stageStatusText(stage?.status, "Waiting for annotation."));
       setSummaryRows(annotationSummaryEl, []);
+      setMessage(annotationDiagnosticsMessageEl, stageStatusText(stage?.status, "Waiting for evidence diagnostics."));
+      hideAnnotationDiagnosticsTable();
       setMessage(annotationVcfMessageEl, stageStatusText(stage?.status, "Waiting for annotated VCF preview."));
       hideAnnotationVcfTable();
       return;
     }
 
     const stats = stage?.stats ?? {};
+    const evidenceSummary = (prefix, label) => {
+      if (stats?.[`${prefix}_enabled`] === false) {
+        return stats?.[`${prefix}_note`] || `${label} disabled`;
+      }
+      const found = Number(stats?.[`${prefix}_found`] ?? 0);
+      const notFound = Number(stats?.[`${prefix}_not_found`] ?? 0);
+      const errors = Number(stats?.[`${prefix}_errors`] ?? 0);
+      return `${found} found / ${notFound} not found / ${errors} errors`;
+    };
+    const warnings = [];
+    if (stats?.dbsnp_warning) warnings.push(String(stats.dbsnp_warning));
+    if (stats?.clinvar_warning) warnings.push(String(stats.clinvar_warning));
+    if (stats?.gnomad_warning) warnings.push(String(stats.gnomad_warning));
     setMessage(annotationMessageEl, "Annotation output is ready.");
     setSummaryRows(annotationSummaryEl, [
       { label: "Tool", value: stats?.tool },
@@ -530,8 +662,90 @@
       { label: "Variants written", value: stats?.variants_written },
       { label: "Output VCF", value: basename(stats?.output_vcf_path) || stats?.output_vcf_path },
       { label: "Exit code", value: stats?.snpeff_exit_code },
+      { label: "dbSNP", value: evidenceSummary("dbsnp", "dbSNP") },
+      { label: "ClinVar", value: evidenceSummary("clinvar", "ClinVar") },
+      { label: "gnomAD", value: evidenceSummary("gnomad", "gnomAD") },
+      { label: "Evidence warnings", value: warnings.length > 0 ? warnings.join(" | ") : "" },
       { label: "Note", value: stats?.note },
     ]);
+
+    const diagnosticSources = [
+      { key: "dbsnp", label: "dbSNP" },
+      { key: "clinvar", label: "ClinVar" },
+      { key: "gnomad", label: "gnomAD" },
+    ];
+
+    const diagnosticsRows = diagnosticSources.map((source) => {
+      const enabled = stats?.[`${source.key}_enabled`] !== false;
+      const errors = Number(stats?.[`${source.key}_errors`] ?? 0);
+      const reasonCountsRaw = stats?.[`${source.key}_error_reason_counts`];
+      const reasonCounts = reasonCountsRaw && typeof reasonCountsRaw === "object" ? reasonCountsRaw : {};
+      const topReasons = Object.entries(reasonCounts)
+        .map(([reason, count]) => ({ reason, count: Number(count || 0) }))
+        .filter((entry) => Number.isFinite(entry.count) && entry.count > 0)
+        .sort((a, b) => b.count - a.count)
+        .slice(0, 3)
+        .map((entry) => `${entry.reason}: ${entry.count}`);
+      const statusCountsRaw = stats?.[`${source.key}_error_http_status_counts`];
+      const statusCounts = statusCountsRaw && typeof statusCountsRaw === "object" ? statusCountsRaw : {};
+      const httpStatuses = Object.entries(statusCounts)
+        .map(([status, count]) => ({ status, count: Number(count || 0) }))
+        .filter((entry) => Number.isFinite(entry.count) && entry.count > 0)
+        .sort((a, b) => b.count - a.count)
+        .slice(0, 4)
+        .map((entry) => `${entry.status}: ${entry.count}`);
+
+      const details = stats?.[`${source.key}_error_details`];
+      const hint = details && typeof details === "object" ? details?.hint || "" : "";
+      const note = stats?.[`${source.key}_note`] || "";
+
+      return {
+        source: source.label,
+        enabled: enabled ? "Yes" : "No",
+        errors,
+        topReasons: topReasons.join(", "),
+        httpStatuses: httpStatuses.join(", "),
+        hint: hint || note || "\u2014",
+      };
+    });
+
+    clearEl(annotationDiagnosticsBodyEl);
+    for (const row of diagnosticsRows) {
+      const tr = document.createElement("tr");
+
+      const sourceTd = document.createElement("td");
+      sourceTd.className = "text-nowrap";
+      sourceTd.textContent = row.source;
+      tr.appendChild(sourceTd);
+
+      const enabledTd = document.createElement("td");
+      enabledTd.textContent = row.enabled;
+      tr.appendChild(enabledTd);
+
+      const errorsTd = document.createElement("td");
+      errorsTd.textContent = String(row.errors);
+      tr.appendChild(errorsTd);
+
+      const reasonsTd = document.createElement("td");
+      reasonsTd.textContent = row.topReasons || "\u2014";
+      tr.appendChild(reasonsTd);
+
+      const httpStatusesTd = document.createElement("td");
+      httpStatusesTd.textContent = row.httpStatuses || "\u2014";
+      tr.appendChild(httpStatusesTd);
+
+      const hintTd = document.createElement("td");
+      hintTd.textContent = row.hint || "\u2014";
+      tr.appendChild(hintTd);
+
+      annotationDiagnosticsBodyEl.appendChild(tr);
+    }
+    annotationDiagnosticsTableEl.hidden = diagnosticsRows.length === 0;
+    const hasAnyEvidenceErrors = diagnosticsRows.some((row) => row.errors > 0);
+    setMessage(
+      annotationDiagnosticsMessageEl,
+      hasAnyEvidenceErrors ? "Evidence retrieval encountered one or more errors." : "No evidence retrieval errors detected.",
+    );
   }
 
   async function refreshAnnotationOutput(runId, stage) {
@@ -739,11 +953,13 @@
   async function refreshPredictions(runId, stage) {
     const failed = stageFailureText(stage, "Prediction failed.");
     if (failed) {
+      cachedPredictionRows = [];
       hideTable(predTableEl, predBodyEl);
       setMessage(predMessageEl, failed);
       return;
     }
     if (!stage || stage.status !== "succeeded") {
+      cachedPredictionRows = [];
       hideTable(predTableEl, predBodyEl);
       setMessage(predMessageEl, stageStatusText(stage?.status, "Waiting for prediction."));
       return;
@@ -754,19 +970,39 @@
         `/api/v1/runs/${encodeURIComponent(runId)}/predictor_outputs?limit=500`,
       );
       if (!resp.ok || !payload?.ok) {
+        cachedPredictionRows = [];
         hideTable(predTableEl, predBodyEl);
         setMessage(predMessageEl, payload?.error?.message || "Unable to load prediction output.");
         return;
       }
       const rows = Array.isArray(payload?.data?.predictor_outputs) ? payload.data.predictor_outputs : [];
-      if (rows.length === 0) {
+      cachedPredictionRows = rows;
+      const totalVariantRows = groupPredictionRows(rows);
+      if (rows.length === 0 || totalVariantRows.length === 0) {
         hideTable(predTableEl, predBodyEl);
         setMessage(predMessageEl, "Prediction stage succeeded but no rows are available for current upload.");
         return;
       }
-      renderPredictionRows(rows);
-      setMessage(predMessageEl, "");
+      const displayRows = predictionRowsForDisplay(rows);
+      if (displayRows.length === 0) {
+        hideTable(predTableEl, predBodyEl);
+        setMessage(
+          predMessageEl,
+          "All prediction rows are currently hidden. Enable 'Show not_applicable rows' to view them.",
+        );
+        return;
+      }
+      renderPredictionRows(displayRows);
+      if (displayRows.length !== totalVariantRows.length && !predShowNotApplicableEl?.checked) {
+        setMessage(
+          predMessageEl,
+          `Showing ${displayRows.length} of ${totalVariantRows.length} variants (all predictors not_applicable hidden).`,
+        );
+      } else {
+        setMessage(predMessageEl, "");
+      }
     } catch {
+      cachedPredictionRows = [];
       hideTable(predTableEl, predBodyEl);
       setMessage(predMessageEl, "Unable to load prediction output.");
     }
@@ -947,6 +1183,8 @@
             setPredictionsMessage(stage?.error?.message || "Prediction failed.");
           } else if (stageStatus === "canceled") {
             setPredictionsMessage("Prediction was canceled.");
+          } else if (stageStatus === "succeeded" && row?.consequence_category === "other") {
+            setPredictionsMessage("Prediction skipped for 'other' classification.");
           } else {
             setPredictionsMessage("Not available for current upload yet.");
           }
@@ -972,7 +1210,7 @@
             setText(target.scoreEl, output?.score != null ? String(output.score) : "\u2014");
             setText(target.labelEl, output?.label != null && output?.label !== "" ? String(output.label) : "\u2014");
             setText(target.reasonEl, output?.reason_message || output?.reason_code || "\u2014");
-            setText(target.timestampEl, output?.created_at ? String(output.created_at) : "\u2014");
+            setText(target.timestampEl, output?.created_at ? formatDateTime(output.created_at) : "\u2014");
             setText(target.sourceEl, output?.predictor_key ? String(output.predictor_key) : predictorKey);
           }
 
@@ -1009,6 +1247,7 @@
   }
 
   function resetToNoRun() {
+    cachedPredictionRows = [];
     setMessage(finalMessageEl, "Start a run to view partial and final results.");
     setMessage(parserMessageEl, "Start a run to see parser output.");
     setSummaryRows(parserSummaryEl, []);
@@ -1024,11 +1263,39 @@
 
     setMessage(annotationMessageEl, "Start a run to see annotation output.");
     setSummaryRows(annotationSummaryEl, []);
+    setMessage(annotationDiagnosticsMessageEl, "Start a run to see evidence diagnostics.");
+    hideAnnotationDiagnosticsTable();
     setMessage(annotationVcfMessageEl, "Start a run to see annotated VCF preview.");
     hideAnnotationVcfTable();
 
     setMessage(reportingMessageEl, "Start a run to see reporting output.");
     setSummaryRows(reportingSummaryEl, []);
+  }
+
+  if (predShowNotApplicableEl) {
+    predShowNotApplicableEl.checked = false;
+    predShowNotApplicableEl.addEventListener("change", () => {
+      if (!cachedPredictionRows.length) return;
+      const totalVariantRows = groupPredictionRows(cachedPredictionRows);
+      const displayRows = predictionRowsForDisplay(cachedPredictionRows);
+      if (displayRows.length === 0) {
+        hideTable(predTableEl, predBodyEl);
+        setMessage(
+          predMessageEl,
+          "All prediction rows are currently hidden. Enable 'Show not_applicable rows' to view them.",
+        );
+        return;
+      }
+      renderPredictionRows(displayRows);
+      if (displayRows.length !== totalVariantRows.length && !predShowNotApplicableEl.checked) {
+        setMessage(
+          predMessageEl,
+          `Showing ${displayRows.length} of ${totalVariantRows.length} variants (all predictors not_applicable hidden).`,
+        );
+      } else {
+        setMessage(predMessageEl, "");
+      }
+    });
   }
 
   async function refresh() {
@@ -1074,6 +1341,10 @@
       await refreshAnnotationOutput(runId, annotationStage);
       renderReporting(reportingStage);
 
+      if (isTerminalPipelineSnapshot(stages)) {
+        pausePolling = true;
+        return;
+      }
       scheduleNextRefresh(chooseNextInterval(stages));
     } catch {
       setMessage(finalMessageEl, "Unable to load results right now.");

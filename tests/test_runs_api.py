@@ -289,6 +289,49 @@ class RunsApiTestCase(unittest.TestCase):
             )
             self.assertTrue(all(s["status"] == "queued" for s in stages))
 
+    def test_create_app_recovers_interrupted_running_run_on_startup(self):
+        import sys
+
+        if SRC_DIR not in sys.path:
+            sys.path.insert(0, SRC_DIR)
+
+        import app as sp_app  # noqa: E402
+        from storage.runs import create_run  # noqa: E402
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = os.path.join(tmpdir, "sp.db")
+            run_id = create_run(db_path)["run_id"]
+
+            conn = sqlite3.connect(db_path)
+            try:
+                conn.execute("UPDATE runs SET status = 'running' WHERE run_id = ?", (run_id,))
+                conn.execute(
+                    """
+                    UPDATE run_stages
+                    SET status = 'running', started_at = ?, completed_at = NULL
+                    WHERE run_id = ? AND stage_name = 'parser'
+                    """,
+                    ("2026-03-09T00:00:00+00:00", run_id),
+                )
+                conn.commit()
+            finally:
+                conn.close()
+
+            flask_app = sp_app.create_app({"TESTING": True, "SP_DB_PATH": db_path})
+            client = flask_app.test_client()
+
+            run_resp = client.get(f"/api/v1/runs/{run_id}")
+            self.assertEqual(run_resp.status_code, 200)
+            run_payload = json.loads(run_resp.get_data(as_text=True))
+            self.assertEqual(run_payload["data"]["status"], "queued")
+
+            stages_resp = client.get(f"/api/v1/runs/{run_id}/stages")
+            self.assertEqual(stages_resp.status_code, 200)
+            stages_payload = json.loads(stages_resp.get_data(as_text=True))
+            by_name = {s["stage_name"]: s for s in stages_payload["data"]["stages"]}
+            self.assertEqual(by_name["parser"]["status"], "failed")
+            self.assertEqual(by_name["parser"]["error"]["code"], "RUN_INTERRUPTED")
+
     def test_get_run_stages_unknown_returns_404(self):
         import sys
 

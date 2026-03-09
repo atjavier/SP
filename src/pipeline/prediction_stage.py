@@ -166,6 +166,16 @@ def _validate_vep_config(config: dict) -> dict | None:
             "alphamissense_file": alpha_file,
             "hint": "SP_VEP_ALPHAMISSENSE_FILE must point to an existing file.",
         }
+    alpha_file_text = str(alpha_file)
+    if alpha_file_text.endswith(".gz"):
+        alpha_tbi = f"{alpha_file_text}.tbi"
+        if not os.path.isfile(alpha_tbi):
+            return {
+                "missing": "SP_VEP_ALPHAMISSENSE_FILE_TBI",
+                "alphamissense_file": alpha_file_text,
+                "alphamissense_tbi_file": alpha_tbi,
+                "hint": "AlphaMissense .tbi index is missing; run sp-vep-init to rebuild plugin data/index.",
+            }
     if script_path and not os.path.isfile(script_path):
         return {
             "missing": "SP_VEP_SCRIPT_PATH",
@@ -187,27 +197,13 @@ def _validate_vep_config(config: dict) -> dict | None:
     return None
 
 
-def _iter_variants(conn, run_id: str):
-    cursor = conn.execute(
-        """
-        SELECT chrom, pos, ref, alt
-        FROM run_variants
-        WHERE run_id = ?
-        ORDER BY chrom, pos, ref, alt
-        """,
-        (run_id,),
-    )
-    for row in cursor:
-        yield {"chrom": row[0], "pos": row[1], "ref": row[2], "alt": row[3]}
-
-
-def _write_minimal_vcf_fast(conn, run_id: str, out_path: str) -> int:
+def _write_minimal_vcf_fast(variants: list[dict], out_path: str) -> int:
     count = 0
     with open(out_path, "w", encoding="utf-8", newline="\n") as f:
         f.write("##fileformat=VCFv4.2\n")
         f.write("##source=sp-prediction\n")
         f.write("#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\n")
-        for variant in _iter_variants(conn, run_id):
+        for variant in variants:
             f.write(
                 f"{variant['chrom']}\t{int(variant['pos'])}\t.\t{variant['ref']}\t{variant['alt']}\t.\t.\t.\n"
             )
@@ -294,6 +290,17 @@ def _extract_predictor_values(record: dict) -> dict:
             if score is None:
                 score = _safe_float(tc.get("alphamissense_score"))
                 label = label or tc.get("alphamissense_class")
+
+            # Some VEP AlphaMissense plugin versions emit a nested payload:
+            # transcript_consequences[].alphamissense = {am_pathogenicity, am_class}
+            if score is None:
+                alpha_payload = tc.get("alphamissense")
+                if isinstance(alpha_payload, dict):
+                    score = _safe_float(alpha_payload.get("am_pathogenicity"))
+                    label = label or alpha_payload.get("am_class")
+                    if score is None:
+                        score = _safe_float(alpha_payload.get("alphamissense_score"))
+                        label = label or alpha_payload.get("alphamissense_class")
             if score is not None:
                 values[_ALPHAMISSENSE_PREDICTOR_KEY] = {
                     "score": score,
@@ -402,8 +409,9 @@ def run_prediction_stage(
     vep_config_overrides: dict | None = None,
 ) -> dict:
     created_at = datetime.now(timezone.utc).isoformat()
-    predictors_executed = list(_PREDICTORS_EXECUTED)
-    stats: dict = {"predictors_executed": predictors_executed, "tool": "vep"}
+    stats: dict = {"predictors_executed": [], "tool": "vep"}
+    alpha_file_path: str | None = None
+    alpha_plugin_dir: str | None = None
 
     try:
         conn = _connect_db(db_path)
@@ -496,216 +504,248 @@ def run_prediction_stage(
             _clear_outputs_for_predictors(conn, db_path, run_id, _PREDICTORS_EXECUTED)
             conn.commit()
 
-            config = _vep_config()
-            if vep_config_overrides:
-                config = {**config, **vep_config_overrides}
-            config = _apply_container_vep_fallback(config)
-            stats["timeout_seconds"] = config["timeout_seconds"]
-            stats["assembly"] = config["assembly"]
-
-            config_error = _validate_vep_config(config)
-            if config_error:
-                conn.execute("BEGIN IMMEDIATE")
-                mark_stage_failed(
-                    db_path,
-                    run_id,
-                    "prediction",
-                    input_uploaded_at=uploaded_at,
-                    error_code="VEP_NOT_CONFIGURED",
-                    error_message="Prediction stage requires VEP runtime configuration.",
-                    error_details=config_error,
-                    conn=conn,
-                    commit=False,
-                )
-                _clear_outputs_for_predictors(conn, db_path, run_id, _PREDICTORS_EXECUTED)
-                conn.commit()
-                raise StageExecutionError(
-                    500,
-                    "VEP_NOT_CONFIGURED",
-                    "Prediction stage requires VEP runtime configuration.",
-                    details=config_error,
-                )
-
-            artifacts_dir = ensure_run_artifacts_dir(db_path, run_id)
-            input_vcf_path = os.path.join(artifacts_dir, "prediction.input.vcf")
-            output_json_path = os.path.join(artifacts_dir, "prediction.vep.jsonl")
-            variants_written = _write_minimal_vcf_fast(conn, run_id, input_vcf_path)
-
-            cmd: list[str] = [config["cmd"]]
-            if config.get("script_path"):
-                cmd.append(str(config["script_path"]))
-            cmd.extend(
-                [
-                    "--input_file",
-                    input_vcf_path,
-                    "--output_file",
-                    output_json_path,
-                    "--format",
-                    "vcf",
-                    "--json",
-                    "--force_overwrite",
-                    "--offline",
-                    "--cache",
-                    "--dir_cache",
-                    str(config["cache_dir"]),
-                    "--assembly",
-                    str(config["assembly"]),
-                    "--sift",
-                    "b",
-                    "--polyphen",
-                    "b",
-                    "--plugin",
-                    f"AlphaMissense,file={config['alphamissense_file']}",
-                ]
-            )
-            if config.get("plugin_dir"):
-                cmd.extend(["--dir_plugins", str(config["plugin_dir"])])
-            if config.get("fasta_path"):
-                cmd.extend(["--fasta", str(config["fasta_path"])])
-            cmd.extend(list(config.get("extra_args") or []))
-
-            stats["variants_processed"] = variants_written
-            stats["vep_output_path"] = output_json_path
-            stats["vep_input_path"] = input_vcf_path
-            stats["vep_cmd"] = os.path.basename(str(config["cmd"]))
-
-            try:
-                completed = subprocess.run(
-                    cmd,
-                    cwd=None,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
-                    check=False,
-                    timeout=int(config["timeout_seconds"]),
-                )
-            except FileNotFoundError:
-                details = {
-                    "cmd": cmd,
-                    "hint": "Set SP_VEP_CMD (and optional SP_VEP_SCRIPT_PATH) to a valid executable.",
-                }
-                conn.execute("BEGIN IMMEDIATE")
-                mark_stage_failed(
-                    db_path,
-                    run_id,
-                    "prediction",
-                    input_uploaded_at=uploaded_at,
-                    error_code="VEP_NOT_CONFIGURED",
-                    error_message="VEP executable is not available.",
-                    error_details=details,
-                    conn=conn,
-                    commit=False,
-                )
-                _clear_outputs_for_predictors(conn, db_path, run_id, _PREDICTORS_EXECUTED)
-                conn.commit()
-                raise StageExecutionError(
-                    500,
-                    "VEP_NOT_CONFIGURED",
-                    "VEP executable is not available.",
-                    details=details,
-                )
-            except subprocess.TimeoutExpired as exc:
-                stderr_raw = exc.stderr
-                if isinstance(stderr_raw, bytes):
-                    stderr_text = stderr_raw.decode("utf-8", errors="replace")
-                else:
-                    stderr_text = str(stderr_raw or "")
-                details = {
-                    "timeout_seconds": config["timeout_seconds"],
-                    "stderr_tail": _tail(stderr_text),
-                    "cmd": cmd,
-                }
-                conn.execute("BEGIN IMMEDIATE")
-                mark_stage_failed(
-                    db_path,
-                    run_id,
-                    "prediction",
-                    input_uploaded_at=uploaded_at,
-                    error_code="VEP_TIMEOUT",
-                    error_message=f"VEP timed out after {config['timeout_seconds']} seconds.",
-                    error_details=details,
-                    conn=conn,
-                    commit=False,
-                )
-                _clear_outputs_for_predictors(conn, db_path, run_id, _PREDICTORS_EXECUTED)
-                conn.commit()
-                raise StageExecutionError(
-                    500,
-                    "VEP_TIMEOUT",
-                    f"VEP timed out after {config['timeout_seconds']} seconds.",
-                    details={"timeout_seconds": config["timeout_seconds"]},
-                )
-            except TimeoutError:
-                details = {"timeout_seconds": config["timeout_seconds"], "cmd": cmd}
-                conn.execute("BEGIN IMMEDIATE")
-                mark_stage_failed(
-                    db_path,
-                    run_id,
-                    "prediction",
-                    input_uploaded_at=uploaded_at,
-                    error_code="VEP_TIMEOUT",
-                    error_message=f"VEP timed out after {config['timeout_seconds']} seconds.",
-                    error_details=details,
-                    conn=conn,
-                    commit=False,
-                )
-                _clear_outputs_for_predictors(conn, db_path, run_id, _PREDICTORS_EXECUTED)
-                conn.commit()
-                raise StageExecutionError(
-                    500,
-                    "VEP_TIMEOUT",
-                    f"VEP timed out after {config['timeout_seconds']} seconds.",
-                    details={"timeout_seconds": config["timeout_seconds"]},
-                )
-
-            stats["vep_exit_code"] = int(completed.returncode)
-            stderr_text = (completed.stderr or b"").decode("utf-8", errors="replace")
-            if stderr_text:
-                stats["vep_stderr_tail"] = _tail(stderr_text)
-
-            if completed.returncode != 0:
-                details = {
-                    "exit_code": completed.returncode,
-                    "stderr_tail": _tail(stderr_text),
-                    "cmd": cmd,
-                    "hint": "Check VEP cache/plugin paths and command-line options.",
-                }
-                conn.execute("BEGIN IMMEDIATE")
-                mark_stage_failed(
-                    db_path,
-                    run_id,
-                    "prediction",
-                    input_uploaded_at=uploaded_at,
-                    error_code="VEP_FAILED",
-                    error_message="VEP execution failed.",
-                    error_details=details,
-                    conn=conn,
-                    commit=False,
-                )
-                _clear_outputs_for_predictors(conn, db_path, run_id, _PREDICTORS_EXECUTED)
-                conn.commit()
-                raise StageExecutionError(500, "VEP_FAILED", "VEP execution failed.", details=details)
-
-            try:
-                records = _load_vep_outputs(output_json_path)
-            except Exception as exc:
-                details = {"reason": str(exc), "output_path": output_json_path}
-                conn.execute("BEGIN IMMEDIATE")
-                mark_stage_failed(
-                    db_path,
-                    run_id,
-                    "prediction",
-                    input_uploaded_at=uploaded_at,
-                    error_code="VEP_PARSE_FAILED",
-                    error_message="Failed to parse VEP output.",
-                    error_details=details,
-                    conn=conn,
-                    commit=False,
-                )
-                _clear_outputs_for_predictors(conn, db_path, run_id, _PREDICTORS_EXECUTED)
-                conn.commit()
-                raise StageExecutionError(500, "VEP_PARSE_FAILED", "Failed to parse VEP output.", details=details)
-
             variants = list(iter_variants_for_run_with_ids(db_path, run_id, conn=conn))
+            classification_rows = conn.execute(
+                "SELECT variant_id, consequence_category FROM run_classifications WHERE run_id = ?",
+                (run_id,),
+            ).fetchall()
+            consequence_by_variant_id = {r[0]: r[1] for r in classification_rows}
+
+            missense_variants = [
+                variant
+                for variant in variants
+                if consequence_by_variant_id.get(variant["variant_id"]) == "missense"
+            ]
+            other_variants_skipped = sum(
+                1
+                for variant in variants
+                if consequence_by_variant_id.get(variant["variant_id"]) == "other"
+            )
+            stats["variants_processed"] = len(variants)
+            stats["variants_sent_to_vep"] = len(missense_variants)
+            stats["variants_skipped_other"] = other_variants_skipped
+
+            records: list[dict] = []
+            if missense_variants:
+                predictors_executed = list(_PREDICTORS_EXECUTED)
+                stats["predictors_executed"] = predictors_executed
+
+                config = _vep_config()
+                if vep_config_overrides:
+                    config = {**config, **vep_config_overrides}
+                config = _apply_container_vep_fallback(config)
+                alpha_file_path = str(config.get("alphamissense_file") or "") or None
+                alpha_plugin_dir = str(config.get("plugin_dir") or "") or None
+                stats["timeout_seconds"] = config["timeout_seconds"]
+                stats["assembly"] = config["assembly"]
+
+                config_error = _validate_vep_config(config)
+                if config_error:
+                    conn.execute("BEGIN IMMEDIATE")
+                    mark_stage_failed(
+                        db_path,
+                        run_id,
+                        "prediction",
+                        input_uploaded_at=uploaded_at,
+                        error_code="VEP_NOT_CONFIGURED",
+                        error_message="Prediction stage requires VEP runtime configuration.",
+                        error_details=config_error,
+                        conn=conn,
+                        commit=False,
+                    )
+                    _clear_outputs_for_predictors(conn, db_path, run_id, _PREDICTORS_EXECUTED)
+                    conn.commit()
+                    raise StageExecutionError(
+                        500,
+                        "VEP_NOT_CONFIGURED",
+                        "Prediction stage requires VEP runtime configuration.",
+                        details=config_error,
+                    )
+
+                artifacts_dir = ensure_run_artifacts_dir(db_path, run_id)
+                input_vcf_path = os.path.join(artifacts_dir, "prediction.input.vcf")
+                output_json_path = os.path.join(artifacts_dir, "prediction.vep.jsonl")
+                variants_written = _write_minimal_vcf_fast(missense_variants, input_vcf_path)
+
+                cmd: list[str] = [config["cmd"]]
+                if config.get("script_path"):
+                    cmd.append(str(config["script_path"]))
+                cmd.extend(
+                    [
+                        "--input_file",
+                        input_vcf_path,
+                        "--output_file",
+                        output_json_path,
+                        "--format",
+                        "vcf",
+                        "--json",
+                        "--force_overwrite",
+                        "--offline",
+                        "--cache",
+                        "--dir_cache",
+                        str(config["cache_dir"]),
+                        "--assembly",
+                        str(config["assembly"]),
+                        "--sift",
+                        "b",
+                        "--polyphen",
+                        "b",
+                        "--plugin",
+                        f"AlphaMissense,file={config['alphamissense_file']}",
+                    ]
+                )
+                if config.get("plugin_dir"):
+                    cmd.extend(["--dir_plugins", str(config["plugin_dir"])])
+                if config.get("fasta_path"):
+                    cmd.extend(["--fasta", str(config["fasta_path"])])
+                cmd.extend(list(config.get("extra_args") or []))
+
+                stats["vep_output_path"] = output_json_path
+                stats["vep_input_path"] = input_vcf_path
+                stats["vep_cmd"] = os.path.basename(str(config["cmd"]))
+                stats["variants_written"] = variants_written
+
+                try:
+                    completed = subprocess.run(
+                        cmd,
+                        cwd=None,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE,
+                        check=False,
+                        timeout=int(config["timeout_seconds"]),
+                    )
+                except FileNotFoundError:
+                    details = {
+                        "cmd": cmd,
+                        "hint": "Set SP_VEP_CMD (and optional SP_VEP_SCRIPT_PATH) to a valid executable.",
+                    }
+                    conn.execute("BEGIN IMMEDIATE")
+                    mark_stage_failed(
+                        db_path,
+                        run_id,
+                        "prediction",
+                        input_uploaded_at=uploaded_at,
+                        error_code="VEP_NOT_CONFIGURED",
+                        error_message="VEP executable is not available.",
+                        error_details=details,
+                        conn=conn,
+                        commit=False,
+                    )
+                    _clear_outputs_for_predictors(conn, db_path, run_id, _PREDICTORS_EXECUTED)
+                    conn.commit()
+                    raise StageExecutionError(
+                        500,
+                        "VEP_NOT_CONFIGURED",
+                        "VEP executable is not available.",
+                        details=details,
+                    )
+                except subprocess.TimeoutExpired as exc:
+                    stderr_raw = exc.stderr
+                    if isinstance(stderr_raw, bytes):
+                        stderr_text = stderr_raw.decode("utf-8", errors="replace")
+                    else:
+                        stderr_text = str(stderr_raw or "")
+                    details = {
+                        "timeout_seconds": config["timeout_seconds"],
+                        "stderr_tail": _tail(stderr_text),
+                        "cmd": cmd,
+                    }
+                    conn.execute("BEGIN IMMEDIATE")
+                    mark_stage_failed(
+                        db_path,
+                        run_id,
+                        "prediction",
+                        input_uploaded_at=uploaded_at,
+                        error_code="VEP_TIMEOUT",
+                        error_message=f"VEP timed out after {config['timeout_seconds']} seconds.",
+                        error_details=details,
+                        conn=conn,
+                        commit=False,
+                    )
+                    _clear_outputs_for_predictors(conn, db_path, run_id, _PREDICTORS_EXECUTED)
+                    conn.commit()
+                    raise StageExecutionError(
+                        500,
+                        "VEP_TIMEOUT",
+                        f"VEP timed out after {config['timeout_seconds']} seconds.",
+                        details={"timeout_seconds": config["timeout_seconds"]},
+                    )
+                except TimeoutError:
+                    details = {"timeout_seconds": config["timeout_seconds"], "cmd": cmd}
+                    conn.execute("BEGIN IMMEDIATE")
+                    mark_stage_failed(
+                        db_path,
+                        run_id,
+                        "prediction",
+                        input_uploaded_at=uploaded_at,
+                        error_code="VEP_TIMEOUT",
+                        error_message=f"VEP timed out after {config['timeout_seconds']} seconds.",
+                        error_details=details,
+                        conn=conn,
+                        commit=False,
+                    )
+                    _clear_outputs_for_predictors(conn, db_path, run_id, _PREDICTORS_EXECUTED)
+                    conn.commit()
+                    raise StageExecutionError(
+                        500,
+                        "VEP_TIMEOUT",
+                        f"VEP timed out after {config['timeout_seconds']} seconds.",
+                        details={"timeout_seconds": config["timeout_seconds"]},
+                    )
+
+                stats["vep_exit_code"] = int(completed.returncode)
+                stderr_text = (completed.stderr or b"").decode("utf-8", errors="replace")
+                if stderr_text:
+                    stats["vep_stderr_tail"] = _tail(stderr_text)
+
+                if completed.returncode != 0:
+                    details = {
+                        "exit_code": completed.returncode,
+                        "stderr_tail": _tail(stderr_text),
+                        "cmd": cmd,
+                        "hint": "Check VEP cache/plugin paths and command-line options.",
+                    }
+                    conn.execute("BEGIN IMMEDIATE")
+                    mark_stage_failed(
+                        db_path,
+                        run_id,
+                        "prediction",
+                        input_uploaded_at=uploaded_at,
+                        error_code="VEP_FAILED",
+                        error_message="VEP execution failed.",
+                        error_details=details,
+                        conn=conn,
+                        commit=False,
+                    )
+                    _clear_outputs_for_predictors(conn, db_path, run_id, _PREDICTORS_EXECUTED)
+                    conn.commit()
+                    raise StageExecutionError(500, "VEP_FAILED", "VEP execution failed.", details=details)
+
+                try:
+                    records = _load_vep_outputs(output_json_path)
+                except Exception as exc:
+                    details = {"reason": str(exc), "output_path": output_json_path}
+                    conn.execute("BEGIN IMMEDIATE")
+                    mark_stage_failed(
+                        db_path,
+                        run_id,
+                        "prediction",
+                        input_uploaded_at=uploaded_at,
+                        error_code="VEP_PARSE_FAILED",
+                        error_message="Failed to parse VEP output.",
+                        error_details=details,
+                        conn=conn,
+                        commit=False,
+                    )
+                    _clear_outputs_for_predictors(conn, db_path, run_id, _PREDICTORS_EXECUTED)
+                    conn.commit()
+                    raise StageExecutionError(
+                        500, "VEP_PARSE_FAILED", "Failed to parse VEP output.", details=details
+                    )
+            else:
+                stats["predictors_executed"] = []
+                stats["note"] = "No missense variants found; predictor execution skipped."
+
             variant_id_by_key: dict[tuple[str, int, str, str], str] = {}
             for variant in variants:
                 key = (
@@ -726,11 +766,52 @@ def run_prediction_stage(
                     continue
                 predictor_by_variant_id[variant_id] = _extract_predictor_values(record)
 
-            classification_rows = conn.execute(
-                "SELECT variant_id, consequence_category FROM run_classifications WHERE run_id = ?",
-                (run_id,),
-            ).fetchall()
-            consequence_by_variant_id = {r[0]: r[1] for r in classification_rows}
+            missense_variant_ids = {variant["variant_id"] for variant in missense_variants}
+            missense_with_sift_or_polyphen = 0
+            missense_with_alphamissense = 0
+            for variant_id in missense_variant_ids:
+                values = predictor_by_variant_id.get(variant_id) or {}
+                if _SIFT_PREDICTOR_KEY in values or _POLYPHEN2_PREDICTOR_KEY in values:
+                    missense_with_sift_or_polyphen += 1
+                if _ALPHAMISSENSE_PREDICTOR_KEY in values:
+                    missense_with_alphamissense += 1
+
+            stats["missense_variants"] = len(missense_variant_ids)
+            stats["missense_with_sift_or_polyphen"] = missense_with_sift_or_polyphen
+            stats["missense_with_alphamissense"] = missense_with_alphamissense
+
+            if (
+                missense_variant_ids
+                and missense_with_sift_or_polyphen > 0
+                and missense_with_alphamissense == 0
+            ):
+                details = {
+                    "alpha_file": alpha_file_path,
+                    "alpha_plugin_dir": alpha_plugin_dir,
+                    "missense_variants": len(missense_variant_ids),
+                    "missense_with_sift_or_polyphen": missense_with_sift_or_polyphen,
+                    "hint": "AlphaMissense plugin appears unavailable. Verify SP_VEP_ALPHAMISSENSE_FILE, tabix index (.tbi), and plugin runtime setup.",
+                }
+                conn.execute("BEGIN IMMEDIATE")
+                mark_stage_failed(
+                    db_path,
+                    run_id,
+                    "prediction",
+                    input_uploaded_at=uploaded_at,
+                    error_code="ALPHAMISSENSE_NOT_AVAILABLE",
+                    error_message="AlphaMissense output was missing for all missense variants.",
+                    error_details=details,
+                    conn=conn,
+                    commit=False,
+                )
+                _clear_outputs_for_predictors(conn, db_path, run_id, _PREDICTORS_EXECUTED)
+                conn.commit()
+                raise StageExecutionError(
+                    500,
+                    "ALPHAMISSENSE_NOT_AVAILABLE",
+                    "AlphaMissense output was missing for all missense variants.",
+                    details=details,
+                )
 
             outcome_counts_by_predictor: dict[str, dict[str, int]] = {
                 key: {} for key in _PREDICTORS_EXECUTED
@@ -739,6 +820,8 @@ def run_prediction_stage(
             outputs: list[dict] = []
             for variant in variants:
                 category = consequence_by_variant_id.get(variant["variant_id"])
+                if category == "other":
+                    continue
                 predictor_values = predictor_by_variant_id.get(variant["variant_id"], {})
 
                 for predictor_key, predictor_label in _PREDICTOR_SPECS:

@@ -41,6 +41,40 @@ check_vep_perl_runtime() {
     -e 1 >/tmp/sp_vep_perl_check.log 2>&1
 }
 
+check_alphamissense_runtime() {
+  local smoke_dir="${VEP_ROOT}/.smoke"
+  local input_vcf="${smoke_dir}/alphamissense-smoke.vcf"
+  local output_json="${smoke_dir}/alphamissense-smoke.jsonl"
+  mkdir -p "${smoke_dir}"
+
+  cat >"${input_vcf}" <<'EOF'
+##fileformat=VCFv4.2
+#CHROM	POS	ID	REF	ALT	QUAL	FILTER	INFO
+7	140753336	.	A	T	.	.	.
+EOF
+
+  perl "${VEP_DIR}/vep" \
+    --input_file "${input_vcf}" \
+    --output_file "${output_json}" \
+    --format vcf \
+    --json \
+    --force_overwrite \
+    --offline \
+    --cache \
+    --dir_cache "${VEP_CACHE_DIR}" \
+    --assembly "${VEP_ASSEMBLY}" \
+    --sift b \
+    --polyphen b \
+    --plugin "AlphaMissense,file=${ALPHAMISSENSE_FILE}" \
+    --dir_plugins "${VEP_PLUGIN_DIR}" \
+    >/tmp/sp_vep_alpha_smoke.stdout 2>/tmp/sp_vep_alpha_smoke.stderr || return 1
+
+  if grep -Eq '"am_pathogenicity"|"alphamissense_score"|"am_class"|"alphamissense_class"' "${output_json}"; then
+    return 0
+  fi
+  return 1
+}
+
 if check_vep_perl_runtime; then
   HAS_VEP_PERL_RUNTIME=1
 else
@@ -48,7 +82,14 @@ else
 fi
 echo "[setup_vep_runtime] Perl runtime check available=${HAS_VEP_PERL_RUNTIME}"
 
-if [ -f "${READY_MARKER}" ] && [ -f "${VEP_DIR}/vep" ] && [ -f "${REQUIRED_API_FILE}" ] && [ -d "${VEP_CACHE_VERSION_DIR}" ] && [ -f "${ALPHAMISSENSE_FILE}" ] && [ -f "${ALPHAMISSENSE_FILE}.tbi" ] && [ "${HAS_VEP_PERL_RUNTIME}" -eq 1 ]; then
+if check_alphamissense_runtime; then
+  HAS_ALPHAMISSENSE_RUNTIME=1
+else
+  HAS_ALPHAMISSENSE_RUNTIME=0
+fi
+echo "[setup_vep_runtime] AlphaMissense runtime check available=${HAS_ALPHAMISSENSE_RUNTIME}"
+
+if [ -f "${READY_MARKER}" ] && [ -f "${VEP_DIR}/vep" ] && [ -f "${REQUIRED_API_FILE}" ] && [ -d "${VEP_CACHE_VERSION_DIR}" ] && [ -f "${ALPHAMISSENSE_FILE}" ] && [ -f "${ALPHAMISSENSE_FILE}.tbi" ] && [ "${HAS_VEP_PERL_RUNTIME}" -eq 1 ] && [ "${HAS_ALPHAMISSENSE_RUNTIME}" -eq 1 ]; then
   echo "[setup_vep_runtime] Existing VEP runtime detected. Skipping setup."
   exit 0
 fi
@@ -125,6 +166,28 @@ if [ ! -f "${ALPHAMISSENSE_FILE}.tbi" ]; then
   tabix -s 1 -b 2 -e 2 -S 1 -f "${ALPHAMISSENSE_FILE}"
 else
   echo "[setup_vep_runtime] AlphaMissense tabix index already present"
+fi
+
+if ! check_alphamissense_runtime; then
+  echo "[setup_vep_runtime] AlphaMissense smoke test failed; reinstalling plugin module"
+  perl INSTALL.pl \
+    --NO_UPDATE \
+    --NO_TEST \
+    --NO_HTSLIB \
+    --AUTO p \
+    --PLUGINS AlphaMissense \
+    --DESTDIR "${VEP_DIR}" \
+    --CACHEDIR "${VEP_CACHE_DIR}" \
+    --PLUGINSDIR "${VEP_PLUGIN_DIR}"
+fi
+
+if ! check_alphamissense_runtime; then
+  echo "[setup_vep_runtime] ERROR: AlphaMissense plugin runtime check failed"
+  if [ -f /tmp/sp_vep_alpha_smoke.stderr ]; then
+    echo "[setup_vep_runtime] --- alpha smoke stderr tail ---"
+    tail -n 80 /tmp/sp_vep_alpha_smoke.stderr || true
+  fi
+  exit 1
 fi
 
 if [ ! -d "${VEP_CACHE_VERSION_DIR}" ]; then

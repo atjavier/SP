@@ -97,7 +97,7 @@ def list_pipeline_stages(
     run_id: str,
     *,
     conn: sqlite3.Connection | None = None,
-    backfill_missing: bool = True,
+    backfill_missing: bool = False,
     commit: bool = True,
 ) -> list[dict]:
     with _maybe_connection(db_path, conn) as active:
@@ -277,6 +277,13 @@ def reset_stage_and_downstream(
                 from storage.predictor_outputs import clear_predictor_outputs_for_run
 
                 clear_predictor_outputs_for_run(db_path, run_id, conn=active, commit=False)
+
+            if "annotation" in stages_to_reset:
+                from storage.clinvar_evidence import clear_clinvar_evidence_for_run
+                from storage.dbsnp_evidence import clear_dbsnp_evidence_for_run
+
+                clear_dbsnp_evidence_for_run(db_path, run_id, conn=active, commit=False)
+                clear_clinvar_evidence_for_run(db_path, run_id, conn=active, commit=False)
 
             if commit and began_transaction:
                 active.commit()

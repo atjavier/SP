@@ -18,6 +18,7 @@ class PreAnnotationsStorageTestCase(unittest.TestCase):
         from storage.pre_annotations import (  # noqa: E402
             clear_pre_annotations_for_run,
             list_pre_annotations_for_run,
+            list_pre_annotations_for_run_public,
             upsert_pre_annotations_for_run,
         )
 
@@ -85,10 +86,19 @@ class PreAnnotationsStorageTestCase(unittest.TestCase):
             self.assertEqual(updated[0]["substitution_class"], "transversion")
             self.assertEqual(updated[0]["details"]["note"], "updated")
 
+            public_rows = list_pre_annotations_for_run_public(db_path, run_id, limit=10)
+            self.assertEqual(len(public_rows), 1)
+            self.assertEqual(public_rows[0]["variant_id"], "v1")
+            self.assertNotIn("details", public_rows[0])
+            self.assertNotIn("rsid", public_rows[0])
+            self.assertNotIn("gnomad_global_af", public_rows[0])
+            self.assertNotIn("clinvar_clinical_significance", public_rows[0])
+            self.assertNotIn("known_variant", public_rows[0])
+            self.assertNotIn("common_variant", public_rows[0])
+
             clear_pre_annotations_for_run(db_path, run_id)
             self.assertEqual(list_pre_annotations_for_run(db_path, run_id), [])
 
 
 if __name__ == "__main__":
     unittest.main()
-
