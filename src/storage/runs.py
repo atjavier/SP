@@ -1,3 +1,4 @@
+import os
 import uuid
 import json
 from datetime import datetime, timezone
@@ -33,6 +34,35 @@ class RunNotStartableError(Exception):
 
 
 _VALID_RUN_STATUSES: frozenset[str] = frozenset({"queued", "running", "canceled"})
+_VALID_ANNOTATION_EVIDENCE_POLICIES: frozenset[str] = frozenset({"stop", "continue"})
+
+
+class RunPolicyNotUpdatableError(Exception):
+    def __init__(self, current_status: str) -> None:
+        super().__init__(f"Run policy cannot be updated from status: {current_status}")
+        self.current_status = current_status
+
+
+def _truthy_env(name: str) -> bool:
+    value = (os.environ.get(name) or "").strip().lower()
+    return value in {"1", "true", "yes", "y", "on"}
+
+
+def normalize_annotation_evidence_policy(value: str | None) -> str | None:
+    text = (value or "").strip().lower()
+    if text in _VALID_ANNOTATION_EVIDENCE_POLICIES:
+        return text
+    return None
+
+
+def default_annotation_evidence_policy() -> str:
+    explicit = normalize_annotation_evidence_policy(os.environ.get("SP_ANNOTATION_EVIDENCE_POLICY_DEFAULT"))
+    if explicit:
+        return explicit
+    legacy = os.environ.get("SP_ANNOTATION_FAIL_ON_EVIDENCE_ERROR")
+    if legacy is None:
+        return "continue"
+    return "stop" if _truthy_env("SP_ANNOTATION_FAIL_ON_EVIDENCE_ERROR") else "continue"
 
 
 def recover_interrupted_runs(db_path: str) -> dict[str, int]:
@@ -186,25 +216,40 @@ def list_runs(db_path: str) -> list[dict[str, str]]:
     with open_connection(db_path) as conn:
         init_schema(conn)
         rows = conn.execute(
-            "SELECT run_id, status, created_at, reference_build FROM runs ORDER BY created_at DESC",
+            """
+            SELECT run_id, status, created_at, reference_build, annotation_evidence_policy
+            FROM runs
+            ORDER BY created_at DESC
+            """,
         ).fetchall()
     return [
-        {"run_id": row[0], "status": row[1], "created_at": row[2], "reference_build": row[3]}
+        {
+            "run_id": row[0],
+            "status": row[1],
+            "created_at": row[2],
+            "reference_build": row[3],
+            "annotation_evidence_policy": normalize_annotation_evidence_policy(row[4])
+            or default_annotation_evidence_policy(),
+        }
         for row in rows
     ]
 
 
-def create_run(db_path: str) -> dict[str, str]:
+def create_run(db_path: str, *, annotation_evidence_policy: str | None = None) -> dict[str, str]:
     run_id = str(uuid.uuid4())
     status = "queued"
     created_at = datetime.now(timezone.utc).isoformat()
     reference_build = "GRCh38"
+    policy = normalize_annotation_evidence_policy(annotation_evidence_policy) or default_annotation_evidence_policy()
 
     with open_connection(db_path) as conn:
         init_schema(conn)
         conn.execute(
-            "INSERT INTO runs (run_id, status, created_at, reference_build) VALUES (?, ?, ?, ?)",
-            (run_id, status, created_at, reference_build),
+            """
+            INSERT INTO runs (run_id, status, created_at, reference_build, annotation_evidence_policy)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (run_id, status, created_at, reference_build, policy),
         )
         ensure_pipeline_stages_exist(db_path, run_id, conn=conn, commit=False)
         conn.commit()
@@ -214,6 +259,7 @@ def create_run(db_path: str) -> dict[str, str]:
         "status": status,
         "created_at": created_at,
         "reference_build": reference_build,
+        "annotation_evidence_policy": policy,
     }
 
 
@@ -221,12 +267,58 @@ def get_run(db_path: str, run_id: str) -> dict[str, str] | None:
     with open_connection(db_path) as conn:
         init_schema(conn)
         row = conn.execute(
-            "SELECT run_id, status, created_at, reference_build FROM runs WHERE run_id = ?",
+            """
+            SELECT run_id, status, created_at, reference_build, annotation_evidence_policy
+            FROM runs
+            WHERE run_id = ?
+            """,
             (run_id,),
         ).fetchone()
     if not row:
         return None
-    return {"run_id": row[0], "status": row[1], "created_at": row[2], "reference_build": row[3]}
+    return {
+        "run_id": row[0],
+        "status": row[1],
+        "created_at": row[2],
+        "reference_build": row[3],
+        "annotation_evidence_policy": normalize_annotation_evidence_policy(row[4]) or default_annotation_evidence_policy(),
+    }
+
+
+def update_run_annotation_evidence_policy(
+    db_path: str,
+    run_id: str,
+    *,
+    annotation_evidence_policy: str,
+) -> dict[str, str]:
+    policy = normalize_annotation_evidence_policy(annotation_evidence_policy)
+    if policy is None:
+        raise ValueError("Invalid annotation_evidence_policy value.")
+
+    with open_connection(db_path) as conn:
+        init_schema(conn)
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute(
+            "SELECT status FROM runs WHERE run_id = ?",
+            (run_id,),
+        ).fetchone()
+        if not row:
+            conn.rollback()
+            raise RunNotFoundError("Run not found.")
+        current_status = row[0]
+        if current_status == "running":
+            conn.rollback()
+            raise RunPolicyNotUpdatableError(current_status)
+        conn.execute(
+            "UPDATE runs SET annotation_evidence_policy = ? WHERE run_id = ?",
+            (policy, run_id),
+        )
+        conn.commit()
+
+    record = get_run(db_path, run_id)
+    if not record:
+        raise RunNotFoundError("Run not found.")
+    return record
 
 
 def cancel_run(db_path: str, run_id: str) -> dict[str, str]:
@@ -253,6 +345,7 @@ def cancel_run(db_path: str, run_id: str) -> dict[str, str]:
             from storage.classifications import clear_classifications_for_run
             from storage.clinvar_evidence import clear_clinvar_evidence_for_run
             from storage.dbsnp_evidence import clear_dbsnp_evidence_for_run
+            from storage.gnomad_evidence import clear_gnomad_evidence_for_run
             from storage.pre_annotations import clear_pre_annotations_for_run
             from storage.predictor_outputs import clear_predictor_outputs_for_run
 
@@ -261,10 +354,15 @@ def cancel_run(db_path: str, run_id: str) -> dict[str, str]:
             clear_predictor_outputs_for_run(db_path, run_id, conn=conn, commit=False)
             clear_dbsnp_evidence_for_run(db_path, run_id, conn=conn, commit=False)
             clear_clinvar_evidence_for_run(db_path, run_id, conn=conn, commit=False)
+            clear_gnomad_evidence_for_run(db_path, run_id, conn=conn, commit=False)
             conn.commit()
 
             row = conn.execute(
-                "SELECT run_id, status, created_at, reference_build FROM runs WHERE run_id = ?",
+                """
+                SELECT run_id, status, created_at, reference_build, annotation_evidence_policy
+                FROM runs
+                WHERE run_id = ?
+                """,
                 (run_id,),
             ).fetchone()
             if not row:
@@ -274,6 +372,8 @@ def cancel_run(db_path: str, run_id: str) -> dict[str, str]:
                 "status": row[1],
                 "created_at": row[2],
                 "reference_build": row[3],
+                "annotation_evidence_policy": normalize_annotation_evidence_policy(row[4])
+                or default_annotation_evidence_policy(),
             }
 
         conn.commit()

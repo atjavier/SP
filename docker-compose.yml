@@ -37,6 +37,26 @@ services:
       - snpeff-data:/opt/snpeff
     restart: "no"
 
+  sp-evidence-init:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: sp-local:latest
+    command: ["/bin/bash", "/app/scripts/setup_evidence_runtime.sh"]
+    environment:
+      EVIDENCE_ROOT: /opt/evidence
+      INSTALL_DBSNP: ${INSTALL_DBSNP:-1}
+      INSTALL_CLINVAR: ${INSTALL_CLINVAR:-1}
+      DBSNP_LOCAL_VCF_PATH: ${SP_DBSNP_LOCAL_VCF_PATH:-/opt/evidence/dbsnp/dbsnp_all_grch38.vcf.gz}
+      DBSNP_VCF_URL: ${DBSNP_VCF_URL:-https://ftp.ncbi.nlm.nih.gov/snp/latest_release/VCF/GCF_000001405.40.gz}
+      DBSNP_TBI_URL: ${DBSNP_TBI_URL:-https://ftp.ncbi.nlm.nih.gov/snp/latest_release/VCF/GCF_000001405.40.gz.tbi}
+      CLINVAR_LOCAL_VCF_PATH: ${SP_CLINVAR_LOCAL_VCF_PATH:-/opt/evidence/clinvar/clinvar_grch38.vcf.gz}
+      CLINVAR_VCF_URL: ${CLINVAR_VCF_URL:-https://ftp.ncbi.nlm.nih.gov/pub/clinvar/vcf_GRCh38/clinvar.vcf.gz}
+      CLINVAR_TBI_URL: ${CLINVAR_TBI_URL:-https://ftp.ncbi.nlm.nih.gov/pub/clinvar/vcf_GRCh38/clinvar.vcf.gz.tbi}
+    volumes:
+      - evidence-data:/opt/evidence
+    restart: "no"
+
   sp:
     build:
       context: .
@@ -46,6 +66,8 @@ services:
       sp-vep-init:
         condition: service_completed_successfully
       sp-snpeff-init:
+        condition: service_completed_successfully
+      sp-evidence-init:
         condition: service_completed_successfully
     ports:
       - "8000:8000"
@@ -70,12 +92,17 @@ services:
       SP_VEP_ALPHAMISSENSE_FILE: /opt/vep/.vep/Plugins/AlphaMissense_hg38.tsv.gz
       SP_VEP_ASSEMBLY: GRCh38
       SP_VEP_TIMEOUT_SECONDS: "1800"
+      SP_EVIDENCE_PROFILE: predictor_only
+      SP_EVIDENCE_MODE: ${SP_EVIDENCE_MODE:-hybrid}
+      SP_DBSNP_LOCAL_VCF_PATH: ${SP_DBSNP_LOCAL_VCF_PATH:-/opt/evidence/dbsnp/dbsnp_all_grch38.vcf.gz}
+      SP_CLINVAR_LOCAL_VCF_PATH: ${SP_CLINVAR_LOCAL_VCF_PATH:-/opt/evidence/clinvar/clinvar_grch38.vcf.gz}
       PERL5LIB: /opt/vep/ensembl-vep:/opt/vep/ensembl-vep/modules
       LD_LIBRARY_PATH: /opt/vep/ensembl-vep/htslib
     volumes:
       - instance-data:/app/instance
       - vep-data:/opt/vep:ro
       - snpeff-data:/opt/snpeff:ro
+      - evidence-data:/opt/evidence:ro
     command: ["python", "src/serve.py"]
     restart: unless-stopped
 
@@ -83,3 +110,4 @@ volumes:
   instance-data:
   vep-data:
   snpeff-data:
+  evidence-data:

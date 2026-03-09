@@ -53,6 +53,9 @@ class AppTestCase(unittest.TestCase):
         self.assertIn("for=\"vcf-file\"", html)
         self.assertIn("id=\"vcf-file-help\"", html)
         self.assertIn("aria-describedby=\"vcf-file-help\"", html)
+        self.assertIn("id=\"annotation-evidence-policy-stop\"", html)
+        self.assertIn("id=\"annotation-evidence-policy-continue\"", html)
+        self.assertIn("id=\"annotation-evidence-policy-help\"", html)
 
         self.assertIn("id=\"start-btn\"", html)
         self.assertIn("id=\"new-run-btn\"", html)
@@ -63,6 +66,7 @@ class AppTestCase(unittest.TestCase):
         self.assertIn("id=\"cancel-run-btn\"", html)
         self.assertIn("id=\"current-run-status\"", html)
         self.assertIn("id=\"current-run-reference-build\"", html)
+        self.assertIn("id=\"current-run-evidence-policy\"", html)
         self.assertIn("id=\"current-run-stages\"", html)
         self.assertIn("id=\"current-run-stages-message\"", html)
         self.assertIn("id=\"annotation-vcf-message\"", html)
@@ -98,6 +102,29 @@ class AppTestCase(unittest.TestCase):
         self.assertRegex(
             script,
             r'hidden\.bs\.offcanvas[\s\S]*toFocus\.focus\(\);[\s\S]*catch\s*{\s*// keep cleanup/resume path running even if focus management fails\s*}',
+        )
+
+    def test_run_controls_dispatches_run_changed_and_ignores_self_events(self):
+        import app as sp_app
+
+        flask_app = sp_app.create_app()
+        client = flask_app.test_client()
+        resp = client.get("/static/run_controls.js")
+        self.assertEqual(resp.status_code, 200)
+        script = resp.get_data(as_text=True)
+        resp.close()
+
+        self.assertRegex(
+            script,
+            r"function dispatchRunChanged\(run\)\s*{[\s\S]*?new CustomEvent\(\"sp:run-changed\",[\s\S]*?source:\s*\"run-controls\"",
+        )
+        self.assertRegex(
+            script,
+            r"function setRun\(run\)\s*{[\s\S]*?dispatchRunChanged\(run\);",
+        )
+        self.assertRegex(
+            script,
+            r"window\.addEventListener\(\"sp:run-changed\",[\s\S]*?detail\?\.source === \"run-controls\"[\s\S]*?return;",
         )
 
 

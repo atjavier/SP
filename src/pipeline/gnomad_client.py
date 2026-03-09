@@ -37,6 +37,34 @@ query Variant($variantId: String!, $dataset: DatasetId!) {
 }
 """.strip()
 
+_QUERY_SCHEMA_FALLBACK = """
+query Variant($variantId: String!, $dataset: DatasetId!) {
+  variant(variant_id: $variantId, dataset: $dataset) {
+    variant_id
+    rsid
+    joint {
+      ac
+      an
+    }
+    genome {
+      af
+      ac
+      an
+    }
+    exome {
+      af
+      ac
+      an
+    }
+  }
+}
+""".strip()
+
+_QUERY_MODES: tuple[tuple[str, str], ...] = (
+    ("camel", _QUERY),
+    ("snake", _QUERY_SCHEMA_FALLBACK),
+)
+
 
 @dataclass(frozen=True)
 class GnomadConfig:
@@ -193,6 +221,11 @@ def _is_schema_graphql_error(errors: object) -> bool:
         "cannot query field",
         "unknown type",
         "validation error",
+        "is not defined by type",
+        "is required but not provided",
+        "did you mean",
+        "expected type",
+        "cannot represent",
     )
     return any(marker in messages for marker in schema_markers)
 
@@ -238,18 +271,20 @@ def fetch_gnomad_evidence_for_variant(
     last_error: dict | None = None
     total_retries = 0
     deterministic_statuses: list[int] = []
+    query_mode_index = 0
 
     for variant_id in variant_ids:
-        payload = {
-            "query": _QUERY,
-            "variables": {
-                "variantId": variant_id,
-                "dataset": config.dataset_id,
-            },
-        }
-
-        for attempt in range(1, attempts + 1):
+        attempt = 1
+        while attempt <= attempts:
             _respect_rate_limit(config.min_request_interval_seconds)
+            query_mode, query_text = _QUERY_MODES[query_mode_index]
+            payload = {
+                "query": query_text,
+                "variables": {
+                    "variantId": variant_id,
+                    "dataset": config.dataset_id,
+                },
+            }
             request = Request(
                 url,
                 data=json.dumps(payload).encode("utf-8"),
@@ -284,6 +319,7 @@ def fetch_gnomad_evidence_for_variant(
                             "variant_id": variant_id,
                             "errors": errors,
                             "status_code": status_code,
+                            "query_mode": query_mode,
                             "variant_id_candidates": variant_ids,
                         }
                         if reason_code == "GRAPHQL_SCHEMA_ERROR":
@@ -291,6 +327,10 @@ def fetch_gnomad_evidence_for_variant(
                                 "Query/field mismatch against current gnomAD schema. "
                                 "Validate dataset/query fields and rebuild app image."
                             )
+                        # Try alternate query shape (camel -> snake) once before failing this attempt.
+                        if query_mode_index + 1 < len(_QUERY_MODES):
+                            query_mode_index += 1
+                            continue
                         last_error = {
                             "reason_code": reason_code,
                             "reason_message": reason_message,
@@ -301,11 +341,14 @@ def fetch_gnomad_evidence_for_variant(
                             wait = _backoff_seconds(config, attempt)
                             _set_rate_limit_cooldown(wait)
                             time.sleep(wait)
+                            attempt += 1
                             continue
                     # try alternate IDs before declaring not found
                     break
 
-                gnomad_variant_id = str(variant.get("variantId") or variant_id)
+                gnomad_variant_id = str(
+                    variant.get("variantId") or variant.get("variant_id") or variant_id
+                )
                 global_af, af_source = _extract_global_af(variant)
                 return {
                     "outcome": "found",
@@ -320,6 +363,7 @@ def fetch_gnomad_evidence_for_variant(
                         "reference_genome": config.reference_genome,
                         "status_code": status_code,
                         "af_source": af_source,
+                        "query_mode": query_mode,
                         "variant_id_candidates": variant_ids,
                     },
                     "retrieved_at": _utc_now_iso(),
@@ -328,6 +372,9 @@ def fetch_gnomad_evidence_for_variant(
             except HTTPError as exc:
                 status_code = int(exc.code or 0)
                 if status_code in {400, 404}:
+                    if status_code == 400 and query_mode_index + 1 < len(_QUERY_MODES):
+                        query_mode_index += 1
+                        continue
                     deterministic_statuses.append(status_code)
                     break
                 last_error = {
@@ -349,6 +396,7 @@ def fetch_gnomad_evidence_for_variant(
                     if status_code == 429:
                         _set_rate_limit_cooldown(wait)
                     time.sleep(wait)
+                    attempt += 1
                     continue
                 break
             except json.JSONDecodeError as exc:
@@ -377,6 +425,7 @@ def fetch_gnomad_evidence_for_variant(
                 if attempt < attempts:
                     total_retries += 1
                     time.sleep(_backoff_seconds(config, attempt))
+                    attempt += 1
                     continue
                 break
             except URLError as exc:
@@ -391,6 +440,7 @@ def fetch_gnomad_evidence_for_variant(
                 if attempt < attempts:
                     total_retries += 1
                     time.sleep(_backoff_seconds(config, attempt))
+                    attempt += 1
                     continue
                 break
             except Exception as exc:  # noqa: BLE001
@@ -400,6 +450,7 @@ def fetch_gnomad_evidence_for_variant(
                     "details": {"url": url, "variant_id": variant_id, "variant_id_candidates": variant_ids},
                 }
                 break
+            break
 
     if last_error is None and deterministic_statuses:
         return {

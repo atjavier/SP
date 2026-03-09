@@ -111,10 +111,23 @@ Installed assets:
 Significance:
 - Keeps run records/results durable across container restarts.
 
-### E) Integrations that do not require local dataset downloads
+### E) Evidence local database assets
 
-- dbSNP (6.1), ClinVar (6.2), gnomAD (6.3 code path) use online API retrieval at annotation time.
-- They require network access, retry/timeout config, and no local genome zip/cache files.
+Installed by: `scripts/setup_evidence_runtime.sh` (Docker service: `sp-evidence-init`)  
+Persistent location: Docker volume `evidence-data` mounted at `/opt/evidence`
+
+Assets:
+- dbSNP local VCF + tabix index
+  - default path: `/opt/evidence/dbsnp/dbsnp_all_grch38.vcf.gz`
+- ClinVar local VCF + tabix index
+  - default path: `/opt/evidence/clinvar/clinvar_grch38.vcf.gz`
+
+Significance:
+- Enables local dbSNP/ClinVar retrieval when running in `offline`/`hybrid` mode.
+- Supports reduced network dependency for pilot/tester runs.
+- Runtime mode is controlled by `SP_EVIDENCE_MODE=online|offline|hybrid`.
+- Project decision: gnomAD local dataset bootstrap is disabled due size constraints; gnomAD is run online for this SP.
+- Future recommendation: researchers with sufficient resources can add local gnomAD bootstrap/workflows.
 
 ---
 
@@ -127,9 +140,10 @@ Significance:
 | 4.2 | classification | VEP consequence classification | Integrated |
 | 5.5 | prediction | VEP SIFT/PolyPhen/AlphaMissense | Integrated |
 | 6.0 | annotation | SnpEff annotation | Integrated |
-| 6.1 | annotation evidence | dbSNP retrieval | Integrated |
-| 6.2 | annotation evidence | ClinVar retrieval | Integrated |
-| 6.3 (in progress) | annotation evidence | gnomAD retrieval | Retrieval integrated in annotation stats/diagnostics; dedicated persistence endpoint pending |
+| 6.1 | annotation evidence | dbSNP retrieval (online + local tabix) | Integrated |
+| 6.2 | annotation evidence | ClinVar retrieval (online + local tabix) | Integrated |
+| 6.3 (in progress) | annotation evidence | gnomAD retrieval (online) | Retrieval integrated in annotation stats/diagnostics; dedicated persistence endpoint pending |
+| 6.4 | annotation evidence policy | Run-scoped stop/continue behavior + failure signaling | Integrated |
 
 ---
 
@@ -297,7 +311,7 @@ Primary code: `src/pipeline/annotation_stage.py`
 
 ---
 
-## 6) dbSNP Evidence (online retrieval)
+## 6) dbSNP Evidence (online + local retrieval)
 
 Story key: `6-1` (updated with current API contract)  
 Primary code: `src/pipeline/dbsnp_client.py`, `src/storage/dbsnp_evidence.py`
@@ -305,7 +319,9 @@ Primary code: `src/pipeline/dbsnp_client.py`, `src/storage/dbsnp_evidence.py`
 ### Input
 - Variant fields: `chrom`, `pos`, `ref`, `alt`
 - Config:
+  - `SP_EVIDENCE_MODE` (`online|offline|hybrid`)
   - `SP_DBSNP_ENABLED`
+  - `SP_DBSNP_LOCAL_VCF_PATH` (local/offline mode path)
   - `SP_DBSNP_API_BASE_URL`
   - `SP_DBSNP_TIMEOUT_SECONDS`
   - `SP_DBSNP_RETRY_MAX_ATTEMPTS`
@@ -315,6 +331,21 @@ Primary code: `src/pipeline/dbsnp_client.py`, `src/storage/dbsnp_evidence.py`
   - `SP_DBSNP_ASSEMBLY` (default `GRCh38`)
 
 ### Request format (actual implementation)
+Mode routing:
+- `online`: uses API requests below.
+- `offline`: uses local tabix lookup only.
+- `hybrid`: local tabix lookup first; falls back to API on local lookup errors.
+
+Local lookup format:
+```bash
+tabix <SP_DBSNP_LOCAL_VCF_PATH> <chrom>:<pos>-<pos>
+```
+
+Local chromosome matching behavior:
+- Tries canonical aliases (`1`, `chr1`, `MT`, `chrM`, etc.).
+- For dbSNP local VCF compatibility, also tries RefSeq accessions (for example `NC_000001.11`, `NC_012920.1`) because NCBI dbSNP releases may use RefSeq contig names.
+
+Online API format:
 1. Contextual normalization:
 ```http
 GET {SP_DBSNP_API_BASE_URL}/vcf/{chrom}/{pos}/{ref}/{alt}/contextuals?assembly={SP_DBSNP_ASSEMBLY}[&api_key=...]
@@ -341,7 +372,7 @@ GET {SP_DBSNP_API_BASE_URL}/spdi/{seq_id}:{position}:{deleted}:{inserted}/rsids[
 
 ---
 
-## 7) ClinVar Evidence (online retrieval)
+## 7) ClinVar Evidence (online + local retrieval)
 
 Story key: `6-2`  
 Primary code: `src/pipeline/clinvar_client.py`, `src/storage/clinvar_evidence.py`
@@ -349,7 +380,9 @@ Primary code: `src/pipeline/clinvar_client.py`, `src/storage/clinvar_evidence.py
 ### Input
 - Variant fields: `chrom`, `pos`, `ref`, `alt`
 - Config:
+  - `SP_EVIDENCE_MODE` (`online|offline|hybrid`)
   - `SP_CLINVAR_ENABLED`
+  - `SP_CLINVAR_LOCAL_VCF_PATH` (local/offline mode path)
   - `SP_CLINVAR_API_BASE_URL`
   - `SP_CLINVAR_TIMEOUT_SECONDS`
   - `SP_CLINVAR_RETRY_MAX_ATTEMPTS`
@@ -358,6 +391,17 @@ Primary code: `src/pipeline/clinvar_client.py`, `src/storage/clinvar_evidence.py
   - `SP_CLINVAR_API_KEY` (optional)
 
 ### Request format (actual implementation)
+Mode routing:
+- `online`: uses API requests below.
+- `offline`: uses local tabix lookup only.
+- `hybrid`: local tabix lookup first; falls back to API on local lookup errors.
+
+Local lookup format:
+```bash
+tabix <SP_CLINVAR_LOCAL_VCF_PATH> <chrom>:<pos>-<pos>
+```
+
+Online API format:
 1. Search:
 ```http
 GET {SP_CLINVAR_API_BASE_URL}/esearch.fcgi?db=clinvar&retmode=json&retmax=1&term={chrom}[Chromosome] AND {pos}[Base Position for Assembly GRCh38] AND {ref}>{alt}[Canonical SPDI][&api_key=...]
@@ -393,6 +437,8 @@ Primary code: `src/pipeline/gnomad_client.py`, `src/pipeline/annotation_stage.py
 ### Input
 - Variant fields: `chrom`, `pos`, `ref`, `alt`
 - Config:
+  - `SP_EVIDENCE_PROFILE` (`full|minimum_exome|predictor_only`, default `full`)
+  - `SP_EVIDENCE_MODE` (`online` project default)
   - `SP_GNOMAD_ENABLED`
   - `SP_GNOMAD_API_BASE_URL`
   - `SP_GNOMAD_DATASET_ID` (default `gnomad_r4`)
@@ -404,6 +450,7 @@ Primary code: `src/pipeline/gnomad_client.py`, `src/pipeline/annotation_stage.py
   - `SP_GNOMAD_MIN_REQUEST_INTERVAL_SECONDS`
 
 ### Request format (actual implementation)
+Online GraphQL API format:
 GraphQL POST to:
 ```http
 POST {SP_GNOMAD_API_BASE_URL}
@@ -434,10 +481,81 @@ Client behavior:
   - `gnomad_error_reason_counts`
   - `gnomad_error_http_status_counts`
   - `gnomad_retry_attempts`
+  - `gnomad_variants_eligible`
+  - `gnomad_skipped_out_of_scope`
+
+Profile scope note:
+- When `SP_EVIDENCE_PROFILE=minimum_exome`, out-of-scope variants are skipped before API calls.
+- When `SP_EVIDENCE_PROFILE=predictor_only`, only `missense` variants are queried for evidence.
+- Stage stats surface the same eligible/skipped counters for dbSNP and ClinVar:
+  - `dbsnp_variants_eligible`, `dbsnp_skipped_out_of_scope`
+  - `clinvar_variants_eligible`, `clinvar_skipped_out_of_scope`
 
 ---
 
-## 9) API Exposure Summary (latest-upload gated)
+## 9) Annotation Evidence Failure Policy (run-scoped)
+
+Story key: `6-4`  
+Primary code: `src/storage/runs.py`, `src/app.py`, `src/pipeline/annotation_stage.py`, `src/static/upload_controls.js`, `src/static/run_controls.js`, `src/static/results_controls.js`
+
+### Input
+- Run-scoped policy value:
+  - `stop`
+  - `continue`
+- UI setup control: Start panel radio group (`annotation-evidence-policy`)
+- API payload field: `annotation_evidence_policy`
+
+### Request/API format
+1. Create run with policy:
+```http
+POST /api/v1/runs
+Content-Type: application/json
+
+{ "annotation_evidence_policy": "continue" }
+```
+
+2. Update run policy before start/retry:
+```http
+POST /api/v1/runs/{run_id}/settings
+Content-Type: application/json
+
+{ "annotation_evidence_policy": "stop" }
+```
+
+### Runtime behavior
+- `stop`:
+  - annotation stage fails on evidence retrieval failure
+  - error details include `failed_source`, `missing_outputs`, `annotation_evidence_policy`
+- `continue`:
+  - annotation stage succeeds with warning/error counters in stats
+  - stats include `annotation_evidence_policy`, `fail_on_evidence_error`, `evidence_failed_sources`
+
+### Backward-compatible defaults
+- New default env: `SP_ANNOTATION_EVIDENCE_POLICY_DEFAULT` (`continue|stop`)
+- Legacy fallback: `SP_ANNOTATION_FAIL_ON_EVIDENCE_ERROR` (`0 => continue`, `1 => stop`) only when new default is unset.
+
+### Output structure
+- Runs API payloads now include:
+```json
+{
+  "run_id": "uuid",
+  "status": "queued|running|...",
+  "reference_build": "GRCh38",
+  "annotation_evidence_policy": "continue|stop"
+}
+```
+- Annotation stage failure details (stop mode) include:
+```json
+{
+  "failed_source": "dbsnp|clinvar|gnomad",
+  "missing_outputs": ["dbsnp", "clinvar", "gnomad"],
+  "annotation_evidence_policy": "stop"
+}
+```
+
+---
+
+## 10) API Exposure Summary (latest-upload gated)
 
 These endpoints return data only when the corresponding stage succeeded for the latest upload:
 - `GET /api/v1/runs/<run_id>/pre_annotations`

@@ -86,6 +86,8 @@ def run_pipeline(
     prediction_config: dict | None = None,
 ) -> dict:
     prepared = prepare_pipeline_start(db_path, run_id)
+    run = prepared.get("run") or {}
+    annotation_evidence_policy = run.get("annotation_evidence_policy")
     uploaded_at = prepared["uploaded_at"]
     upload_path = get_run_upload_path(db_path, run_id)
 
@@ -201,6 +203,7 @@ def run_pipeline(
                     uploaded_at=uploaded_at,
                     logger=logger,
                     force=False,
+                    evidence_failure_policy=annotation_evidence_policy,
                 )
             except StageExecutionError as exc:
                 if exc.code == "ALREADY_ANNOTATED":

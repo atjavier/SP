@@ -8,11 +8,18 @@ from datetime import datetime, timezone
 from pipeline.clinvar_client import ClinvarConfig, fetch_clinvar_evidence_for_variant
 from pipeline.dbsnp_client import DbsnpConfig, fetch_dbsnp_evidence_for_variant
 from pipeline.gnomad_client import GnomadConfig, fetch_gnomad_evidence_for_variant
+from pipeline.local_evidence import (
+    fetch_clinvar_evidence_from_local_vcf,
+    fetch_dbsnp_evidence_from_local_vcf,
+    fetch_gnomad_evidence_from_local_vcf,
+)
+from pipeline.cancel_signals import clear_run_cancel_request, is_run_cancel_requested
 from pipeline.parser_stage import StageExecutionError
 from storage.db import connect as _connect_db
 from storage.db import init_schema as _init_schema
 from storage.clinvar_evidence import clear_clinvar_evidence_for_run, upsert_clinvar_evidence_for_run
 from storage.dbsnp_evidence import clear_dbsnp_evidence_for_run, upsert_dbsnp_evidence_for_run
+from storage.gnomad_evidence import clear_gnomad_evidence_for_run, upsert_gnomad_evidence_for_run
 from storage.run_artifacts import ensure_run_artifacts_dir
 from storage.stages import (
     mark_stage_canceled,
@@ -21,6 +28,14 @@ from storage.stages import (
     mark_stage_succeeded,
 )
 from storage.variants import iter_variants_for_run_with_ids
+
+_VALID_EVIDENCE_POLICIES: frozenset[str] = frozenset({"stop", "continue"})
+_VALID_EVIDENCE_PROFILES: frozenset[str] = frozenset({"full", "minimum_exome", "predictor_only"})
+_VALID_EVIDENCE_MODES: frozenset[str] = frozenset({"online", "offline", "hybrid"})
+_EXOME_PROFILE_ALLOWED_CATEGORIES: frozenset[str] = frozenset(
+    {"synonymous", "missense", "nonsense"}
+)
+_PREDICTOR_PROFILE_ALLOWED_CATEGORIES: frozenset[str] = frozenset({"missense"})
 
 
 def _get_run_status(conn, run_id: str) -> str | None:
@@ -149,11 +164,252 @@ def _gnomad_config() -> GnomadConfig:
     )
 
 
-def _annotation_fail_on_evidence_error() -> bool:
+def _normalize_evidence_policy(value: str | None) -> str | None:
+    text = (value or "").strip().lower()
+    if text in _VALID_EVIDENCE_POLICIES:
+        return text
+    return None
+
+
+def _default_annotation_evidence_policy() -> str:
+    explicit = _normalize_evidence_policy(os.environ.get("SP_ANNOTATION_EVIDENCE_POLICY_DEFAULT"))
+    if explicit:
+        return explicit
     raw = os.environ.get("SP_ANNOTATION_FAIL_ON_EVIDENCE_ERROR")
     if raw is None:
-        return False
-    return _truthy_env("SP_ANNOTATION_FAIL_ON_EVIDENCE_ERROR")
+        return "continue"
+    return "stop" if _truthy_env("SP_ANNOTATION_FAIL_ON_EVIDENCE_ERROR") else "continue"
+
+
+def _resolve_annotation_evidence_policy(evidence_failure_policy: str | None = None) -> str:
+    normalized = _normalize_evidence_policy(evidence_failure_policy)
+    if normalized:
+        return normalized
+    return _default_annotation_evidence_policy()
+
+
+def _annotation_fail_on_evidence_error(evidence_failure_policy: str | None = None) -> bool:
+    return _resolve_annotation_evidence_policy(evidence_failure_policy) == "stop"
+
+
+def _evidence_failure_details(details: dict, *, failed_source: str, policy: str) -> dict:
+    merged = dict(details or {})
+    merged["failed_source"] = failed_source
+    merged["missing_outputs"] = ["dbsnp", "clinvar", "gnomad"]
+    merged["annotation_evidence_policy"] = policy
+    return merged
+
+
+def _resolve_evidence_profile() -> str:
+    raw = (os.environ.get("SP_EVIDENCE_PROFILE") or "").strip().lower()
+    if raw == "online":
+        return "full"
+    if raw in {"missense_only", "prediction_only"}:
+        return "predictor_only"
+    if raw in _VALID_EVIDENCE_PROFILES:
+        return raw
+    return "full"
+
+
+def _resolve_evidence_mode() -> str:
+    raw = (os.environ.get("SP_EVIDENCE_MODE") or "").strip().lower()
+    if raw in {"local", "offline_local"}:
+        return "offline"
+    if raw in _VALID_EVIDENCE_MODES:
+        return raw
+    return "online"
+
+
+def _local_vcf_path(env_name: str) -> str | None:
+    text = (os.environ.get(env_name) or "").strip()
+    return text or None
+
+
+def _get_variant_consequence_categories(conn, run_id: str) -> dict[str, str]:
+    rows = conn.execute(
+        """
+        SELECT variant_id, consequence_category
+        FROM run_classifications
+        WHERE run_id = ?
+        """,
+        (run_id,),
+    ).fetchall()
+    result: dict[str, str] = {}
+    for row in rows:
+        variant_id = str(row[0] or "").strip()
+        category = str(row[1] or "").strip().lower()
+        if not variant_id:
+            continue
+        result[variant_id] = category
+    return result
+
+
+def _is_variant_in_evidence_scope(
+    *,
+    evidence_profile: str,
+    variant_id: str | None,
+    categories_by_variant: dict[str, str],
+) -> bool:
+    if evidence_profile == "full":
+        return True
+    key = str(variant_id or "").strip()
+    if not key:
+        return True
+    category = categories_by_variant.get(key)
+    if category is None:
+        # Keep behavior safe for runs that have no/partial classification rows.
+        return True
+    if evidence_profile == "minimum_exome":
+        return category in _EXOME_PROFILE_ALLOWED_CATEGORIES
+    if evidence_profile == "predictor_only":
+        return category in _PREDICTOR_PROFILE_ALLOWED_CATEGORIES
+    return True
+
+
+def _fetch_dbsnp_evidence(
+    config: DbsnpConfig,
+    *,
+    evidence_mode: str,
+    local_vcf_path: str | None,
+    chrom: str,
+    pos: int,
+    ref: str,
+    alt: str,
+) -> dict:
+    if evidence_mode == "online":
+        return fetch_dbsnp_evidence_for_variant(config, chrom=chrom, pos=pos, ref=ref, alt=alt)
+
+    if local_vcf_path:
+        local_result = fetch_dbsnp_evidence_from_local_vcf(
+            local_vcf_path=local_vcf_path,
+            chrom=chrom,
+            pos=pos,
+            ref=ref,
+            alt=alt,
+            timeout_seconds=config.timeout_seconds,
+        )
+        if evidence_mode == "offline" or local_result.get("outcome") in {"found", "not_found"}:
+            return local_result
+        local_details = dict(local_result.get("details") or {})
+        fallback = fetch_dbsnp_evidence_for_variant(config, chrom=chrom, pos=pos, ref=ref, alt=alt)
+        merged_details = dict(fallback.get("details") or {})
+        merged_details["local_attempt"] = {
+            "reason_code": local_result.get("reason_code"),
+            "reason_message": local_result.get("reason_message"),
+            "details": local_details,
+        }
+        fallback["details"] = merged_details
+        return fallback
+
+    if evidence_mode == "offline":
+        return {
+            "outcome": "error",
+            "rsid": None,
+            "reason_code": "LOCAL_DB_NOT_CONFIGURED",
+            "reason_message": "Local dbSNP VCF path is not configured.",
+            "details": {"env_var": "SP_DBSNP_LOCAL_VCF_PATH"},
+            "retrieved_at": datetime.now(timezone.utc).isoformat(),
+            "retry_attempts": 0,
+        }
+    return fetch_dbsnp_evidence_for_variant(config, chrom=chrom, pos=pos, ref=ref, alt=alt)
+
+
+def _fetch_clinvar_evidence(
+    config: ClinvarConfig,
+    *,
+    evidence_mode: str,
+    local_vcf_path: str | None,
+    chrom: str,
+    pos: int,
+    ref: str,
+    alt: str,
+) -> dict:
+    if evidence_mode == "online":
+        return fetch_clinvar_evidence_for_variant(config, chrom=chrom, pos=pos, ref=ref, alt=alt)
+
+    if local_vcf_path:
+        local_result = fetch_clinvar_evidence_from_local_vcf(
+            local_vcf_path=local_vcf_path,
+            chrom=chrom,
+            pos=pos,
+            ref=ref,
+            alt=alt,
+            timeout_seconds=config.timeout_seconds,
+        )
+        if evidence_mode == "offline" or local_result.get("outcome") in {"found", "not_found"}:
+            return local_result
+        local_details = dict(local_result.get("details") or {})
+        fallback = fetch_clinvar_evidence_for_variant(config, chrom=chrom, pos=pos, ref=ref, alt=alt)
+        merged_details = dict(fallback.get("details") or {})
+        merged_details["local_attempt"] = {
+            "reason_code": local_result.get("reason_code"),
+            "reason_message": local_result.get("reason_message"),
+            "details": local_details,
+        }
+        fallback["details"] = merged_details
+        return fallback
+
+    if evidence_mode == "offline":
+        return {
+            "outcome": "error",
+            "clinvar_id": None,
+            "clinical_significance": None,
+            "reason_code": "LOCAL_DB_NOT_CONFIGURED",
+            "reason_message": "Local ClinVar VCF path is not configured.",
+            "details": {"env_var": "SP_CLINVAR_LOCAL_VCF_PATH"},
+            "retrieved_at": datetime.now(timezone.utc).isoformat(),
+            "retry_attempts": 0,
+        }
+    return fetch_clinvar_evidence_for_variant(config, chrom=chrom, pos=pos, ref=ref, alt=alt)
+
+
+def _fetch_gnomad_evidence(
+    config: GnomadConfig,
+    *,
+    evidence_mode: str,
+    local_vcf_path: str | None,
+    chrom: str,
+    pos: int,
+    ref: str,
+    alt: str,
+) -> dict:
+    if evidence_mode == "online":
+        return fetch_gnomad_evidence_for_variant(config, chrom=chrom, pos=pos, ref=ref, alt=alt)
+
+    if local_vcf_path:
+        local_result = fetch_gnomad_evidence_from_local_vcf(
+            local_vcf_path=local_vcf_path,
+            chrom=chrom,
+            pos=pos,
+            ref=ref,
+            alt=alt,
+            timeout_seconds=config.timeout_seconds,
+        )
+        if evidence_mode == "offline" or local_result.get("outcome") in {"found", "not_found"}:
+            return local_result
+        local_details = dict(local_result.get("details") or {})
+        fallback = fetch_gnomad_evidence_for_variant(config, chrom=chrom, pos=pos, ref=ref, alt=alt)
+        merged_details = dict(fallback.get("details") or {})
+        merged_details["local_attempt"] = {
+            "reason_code": local_result.get("reason_code"),
+            "reason_message": local_result.get("reason_message"),
+            "details": local_details,
+        }
+        fallback["details"] = merged_details
+        return fallback
+
+    if evidence_mode == "offline":
+        return {
+            "outcome": "error",
+            "gnomad_variant_id": None,
+            "global_af": None,
+            "reason_code": "LOCAL_DB_NOT_CONFIGURED",
+            "reason_message": "Local gnomAD VCF path is not configured.",
+            "details": {"env_var": "SP_GNOMAD_LOCAL_VCF_PATH"},
+            "retrieved_at": datetime.now(timezone.utc).isoformat(),
+            "retry_attempts": 0,
+        }
+    return fetch_gnomad_evidence_for_variant(config, chrom=chrom, pos=pos, ref=ref, alt=alt)
 
 
 def _apply_container_snpeff_fallback(config: dict) -> dict:
@@ -272,6 +528,58 @@ def _variant_key(variant: dict) -> str:
     return f"{variant.get('chrom')}:{variant.get('pos')}:{variant.get('ref')}>{variant.get('alt')}"
 
 
+def _cancel_annotation_and_raise(
+    db_path: str,
+    conn,
+    run_id: str,
+    *,
+    uploaded_at: str,
+) -> None:
+    if not conn.in_transaction:
+        conn.execute("BEGIN IMMEDIATE")
+    conn.execute(
+        "UPDATE runs SET status = ? WHERE run_id = ? AND status IN (?, ?)",
+        ("canceled", run_id, "queued", "running"),
+    )
+    clear_dbsnp_evidence_for_run(db_path, run_id, conn=conn, commit=False)
+    clear_clinvar_evidence_for_run(db_path, run_id, conn=conn, commit=False)
+    clear_gnomad_evidence_for_run(db_path, run_id, conn=conn, commit=False)
+    mark_stage_canceled(
+        db_path,
+        run_id,
+        "annotation",
+        input_uploaded_at=uploaded_at,
+        conn=conn,
+        commit=False,
+    )
+    conn.commit()
+    clear_run_cancel_request(run_id)
+    raise StageExecutionError(409, "RUN_CANCELED", "Run was canceled.")
+
+
+def _ensure_annotation_not_canceled(
+    db_path: str,
+    conn,
+    run_id: str,
+    *,
+    uploaded_at: str,
+) -> None:
+    if is_run_cancel_requested(run_id):
+        _cancel_annotation_and_raise(
+            db_path,
+            conn,
+            run_id,
+            uploaded_at=uploaded_at,
+        )
+    if _get_run_status(conn, run_id) == "canceled":
+        _cancel_annotation_and_raise(
+            db_path,
+            conn,
+            run_id,
+            uploaded_at=uploaded_at,
+        )
+
+
 def run_annotation_stage(
     db_path: str,
     run_id: str,
@@ -279,11 +587,15 @@ def run_annotation_stage(
     uploaded_at: str,
     logger,
     force: bool = False,
+    evidence_failure_policy: str | None = None,
 ) -> dict:
     created_at = datetime.now(timezone.utc).isoformat()
     stats: dict = {"tool": "snpeff", "impl_version": "2026-03-09-r8"}
-    fail_on_evidence_error = _annotation_fail_on_evidence_error()
+    annotation_evidence_policy = _resolve_annotation_evidence_policy(evidence_failure_policy)
+    fail_on_evidence_error = _annotation_fail_on_evidence_error(annotation_evidence_policy)
+    stats["annotation_evidence_policy"] = annotation_evidence_policy
     stats["fail_on_evidence_error"] = bool(fail_on_evidence_error)
+    failed_sources: list[str] = []
 
     try:
         conn = _connect_db(db_path)
@@ -301,6 +613,7 @@ def run_annotation_stage(
             if run_status == "canceled":
                 clear_dbsnp_evidence_for_run(db_path, run_id, conn=conn, commit=False)
                 clear_clinvar_evidence_for_run(db_path, run_id, conn=conn, commit=False)
+                clear_gnomad_evidence_for_run(db_path, run_id, conn=conn, commit=False)
                 mark_stage_canceled(
                     db_path,
                     run_id,
@@ -325,6 +638,7 @@ def run_annotation_stage(
             if prediction_status != "succeeded" or prediction_uploaded_at != uploaded_at:
                 clear_dbsnp_evidence_for_run(db_path, run_id, conn=conn, commit=False)
                 clear_clinvar_evidence_for_run(db_path, run_id, conn=conn, commit=False)
+                clear_gnomad_evidence_for_run(db_path, run_id, conn=conn, commit=False)
                 mark_stage_failed(
                     db_path,
                     run_id,
@@ -363,6 +677,7 @@ def run_annotation_stage(
             conn.execute("BEGIN IMMEDIATE")
             clear_dbsnp_evidence_for_run(db_path, run_id, conn=conn, commit=False)
             clear_clinvar_evidence_for_run(db_path, run_id, conn=conn, commit=False)
+            clear_gnomad_evidence_for_run(db_path, run_id, conn=conn, commit=False)
             conn.commit()
 
             config = _snpeff_config(reference_build)
@@ -622,6 +937,28 @@ def run_annotation_stage(
             stats["dbsnp_assembly"] = str(dbsnp_config.assembly)
 
             variants = list(iter_variants_for_run_with_ids(db_path, run_id, conn=conn))
+            evidence_profile = _resolve_evidence_profile()
+            evidence_mode = _resolve_evidence_mode()
+            dbsnp_local_vcf_path = _local_vcf_path("SP_DBSNP_LOCAL_VCF_PATH")
+            clinvar_local_vcf_path = _local_vcf_path("SP_CLINVAR_LOCAL_VCF_PATH")
+            gnomad_local_vcf_path = _local_vcf_path("SP_GNOMAD_LOCAL_VCF_PATH")
+            categories_by_variant = _get_variant_consequence_categories(conn, run_id)
+            stats["evidence_profile"] = evidence_profile
+            stats["evidence_mode"] = evidence_mode
+            stats["dbsnp_local_vcf_configured"] = bool(dbsnp_local_vcf_path)
+            stats["clinvar_local_vcf_configured"] = bool(clinvar_local_vcf_path)
+            stats["gnomad_local_vcf_configured"] = bool(gnomad_local_vcf_path)
+            if evidence_profile == "minimum_exome":
+                stats["evidence_profile_scope"] = "coding_only"
+                stats["evidence_profile_allowed_categories"] = sorted(
+                    _EXOME_PROFILE_ALLOWED_CATEGORIES
+                )
+            elif evidence_profile == "predictor_only":
+                stats["evidence_profile_scope"] = "predictor_routed_only"
+                stats["evidence_profile_allowed_categories"] = sorted(
+                    _PREDICTOR_PROFILE_ALLOWED_CATEGORIES
+                )
+            stats["classified_variants_available"] = len(categories_by_variant)
             stats["dbsnp_variants_processed"] = len(variants)
             dbsnp_rows: list[dict] = []
             dbsnp_errors: list[dict] = []
@@ -630,26 +967,29 @@ def run_annotation_stage(
             dbsnp_retry_attempts_total = 0
             dbsnp_found_count = 0
             dbsnp_not_found_count = 0
+            dbsnp_skipped_out_of_scope = 0
 
             if dbsnp_config.enabled:
                 for variant in variants:
-                    if _get_run_status(conn, run_id) == "canceled":
-                        conn.execute("BEGIN IMMEDIATE")
-                        clear_dbsnp_evidence_for_run(db_path, run_id, conn=conn, commit=False)
-                        clear_clinvar_evidence_for_run(db_path, run_id, conn=conn, commit=False)
-                        mark_stage_canceled(
-                            db_path,
-                            run_id,
-                            "annotation",
-                            input_uploaded_at=uploaded_at,
-                            conn=conn,
-                            commit=False,
-                        )
-                        conn.commit()
-                        raise StageExecutionError(409, "RUN_CANCELED", "Run was canceled.")
+                    _ensure_annotation_not_canceled(
+                        db_path,
+                        conn,
+                        run_id,
+                        uploaded_at=uploaded_at,
+                    )
 
-                    result = fetch_dbsnp_evidence_for_variant(
+                    if not _is_variant_in_evidence_scope(
+                        evidence_profile=evidence_profile,
+                        variant_id=variant.get("variant_id"),
+                        categories_by_variant=categories_by_variant,
+                    ):
+                        dbsnp_skipped_out_of_scope += 1
+                        continue
+
+                    result = _fetch_dbsnp_evidence(
                         dbsnp_config,
+                        evidence_mode=evidence_mode,
+                        local_vcf_path=dbsnp_local_vcf_path,
                         chrom=str(variant.get("chrom") or ""),
                         pos=int(variant.get("pos") or 0),
                         ref=str(variant.get("ref") or ""),
@@ -701,22 +1041,39 @@ def run_annotation_stage(
                 stats["dbsnp_errors"] = len(dbsnp_errors)
                 stats["dbsnp_error_reason_counts"] = dbsnp_error_reason_counts
                 stats["dbsnp_error_http_status_counts"] = dbsnp_error_http_status_counts
+                stats["dbsnp_variants_eligible"] = len(variants) - dbsnp_skipped_out_of_scope
+                stats["dbsnp_skipped_out_of_scope"] = dbsnp_skipped_out_of_scope
 
                 if dbsnp_errors:
+                    failed_sources.append("dbsnp")
+                    hint = "Check dbSNP network connectivity/API availability and retry settings."
+                    if evidence_mode == "offline":
+                        hint = "Check local dbSNP VCF path/index configuration and tabix availability."
+                    elif evidence_mode == "hybrid":
+                        hint = (
+                            "Check local dbSNP VCF path/index configuration and tabix availability; "
+                            "also verify network/API connectivity for hybrid fallback."
+                        )
                     details = {
                         "errors": dbsnp_errors[:10],
                         "error_count": len(dbsnp_errors),
                         "timeout_seconds": int(dbsnp_config.timeout_seconds),
                         "retry_max_attempts": int(dbsnp_config.retry_max_attempts),
                         "retry_attempts_total": dbsnp_retry_attempts_total,
-                        "hint": "Check dbSNP network connectivity/API availability and retry settings.",
+                        "hint": hint,
                     }
                     stats["dbsnp_error_details"] = details
                     stats["dbsnp_warning"] = "dbSNP retrieval had one or more errors."
                     if fail_on_evidence_error:
+                        details = _evidence_failure_details(
+                            details,
+                            failed_source="dbsnp",
+                            policy=annotation_evidence_policy,
+                        )
                         conn.execute("BEGIN IMMEDIATE")
                         clear_dbsnp_evidence_for_run(db_path, run_id, conn=conn, commit=False)
                         clear_clinvar_evidence_for_run(db_path, run_id, conn=conn, commit=False)
+                        clear_gnomad_evidence_for_run(db_path, run_id, conn=conn, commit=False)
                         mark_stage_failed(
                             db_path,
                             run_id,
@@ -737,6 +1094,12 @@ def run_annotation_stage(
                         )
 
                 conn.execute("BEGIN IMMEDIATE")
+                _ensure_annotation_not_canceled(
+                    db_path,
+                    conn,
+                    run_id,
+                    uploaded_at=uploaded_at,
+                )
                 upsert_dbsnp_evidence_for_run(db_path, run_id, dbsnp_rows, conn=conn, commit=False)
                 conn.commit()
             else:
@@ -747,6 +1110,8 @@ def run_annotation_stage(
                 stats["dbsnp_errors"] = 0
                 stats["dbsnp_error_reason_counts"] = {}
                 stats["dbsnp_error_http_status_counts"] = {}
+                stats["dbsnp_variants_eligible"] = 0
+                stats["dbsnp_skipped_out_of_scope"] = 0
 
             clinvar_config = _clinvar_config()
             stats["clinvar_enabled"] = bool(clinvar_config.enabled)
@@ -763,26 +1128,29 @@ def run_annotation_stage(
             clinvar_retry_attempts_total = 0
             clinvar_found_count = 0
             clinvar_not_found_count = 0
+            clinvar_skipped_out_of_scope = 0
 
             if clinvar_config.enabled:
                 for variant in variants:
-                    if _get_run_status(conn, run_id) == "canceled":
-                        conn.execute("BEGIN IMMEDIATE")
-                        clear_dbsnp_evidence_for_run(db_path, run_id, conn=conn, commit=False)
-                        clear_clinvar_evidence_for_run(db_path, run_id, conn=conn, commit=False)
-                        mark_stage_canceled(
-                            db_path,
-                            run_id,
-                            "annotation",
-                            input_uploaded_at=uploaded_at,
-                            conn=conn,
-                            commit=False,
-                        )
-                        conn.commit()
-                        raise StageExecutionError(409, "RUN_CANCELED", "Run was canceled.")
+                    _ensure_annotation_not_canceled(
+                        db_path,
+                        conn,
+                        run_id,
+                        uploaded_at=uploaded_at,
+                    )
 
-                    result = fetch_clinvar_evidence_for_variant(
+                    if not _is_variant_in_evidence_scope(
+                        evidence_profile=evidence_profile,
+                        variant_id=variant.get("variant_id"),
+                        categories_by_variant=categories_by_variant,
+                    ):
+                        clinvar_skipped_out_of_scope += 1
+                        continue
+
+                    result = _fetch_clinvar_evidence(
                         clinvar_config,
+                        evidence_mode=evidence_mode,
+                        local_vcf_path=clinvar_local_vcf_path,
                         chrom=str(variant.get("chrom") or ""),
                         pos=int(variant.get("pos") or 0),
                         ref=str(variant.get("ref") or ""),
@@ -835,22 +1203,39 @@ def run_annotation_stage(
                 stats["clinvar_errors"] = len(clinvar_errors)
                 stats["clinvar_error_reason_counts"] = clinvar_error_reason_counts
                 stats["clinvar_error_http_status_counts"] = clinvar_error_http_status_counts
+                stats["clinvar_variants_eligible"] = len(variants) - clinvar_skipped_out_of_scope
+                stats["clinvar_skipped_out_of_scope"] = clinvar_skipped_out_of_scope
 
                 if clinvar_errors:
+                    failed_sources.append("clinvar")
+                    hint = "Check ClinVar network connectivity/API availability and retry settings."
+                    if evidence_mode == "offline":
+                        hint = "Check local ClinVar VCF path/index configuration and tabix availability."
+                    elif evidence_mode == "hybrid":
+                        hint = (
+                            "Check local ClinVar VCF path/index configuration and tabix availability; "
+                            "also verify network/API connectivity for hybrid fallback."
+                        )
                     details = {
                         "errors": clinvar_errors[:10],
                         "error_count": len(clinvar_errors),
                         "timeout_seconds": int(clinvar_config.timeout_seconds),
                         "retry_max_attempts": int(clinvar_config.retry_max_attempts),
                         "retry_attempts_total": clinvar_retry_attempts_total,
-                        "hint": "Check ClinVar network connectivity/API availability and retry settings.",
+                        "hint": hint,
                     }
                     stats["clinvar_error_details"] = details
                     stats["clinvar_warning"] = "ClinVar retrieval had one or more errors."
                     if fail_on_evidence_error:
+                        details = _evidence_failure_details(
+                            details,
+                            failed_source="clinvar",
+                            policy=annotation_evidence_policy,
+                        )
                         conn.execute("BEGIN IMMEDIATE")
                         clear_dbsnp_evidence_for_run(db_path, run_id, conn=conn, commit=False)
                         clear_clinvar_evidence_for_run(db_path, run_id, conn=conn, commit=False)
+                        clear_gnomad_evidence_for_run(db_path, run_id, conn=conn, commit=False)
                         mark_stage_failed(
                             db_path,
                             run_id,
@@ -871,6 +1256,12 @@ def run_annotation_stage(
                         )
 
                 conn.execute("BEGIN IMMEDIATE")
+                _ensure_annotation_not_canceled(
+                    db_path,
+                    conn,
+                    run_id,
+                    uploaded_at=uploaded_at,
+                )
                 upsert_clinvar_evidence_for_run(db_path, run_id, clinvar_rows, conn=conn, commit=False)
                 conn.commit()
             else:
@@ -881,6 +1272,8 @@ def run_annotation_stage(
                 stats["clinvar_errors"] = 0
                 stats["clinvar_error_reason_counts"] = {}
                 stats["clinvar_error_http_status_counts"] = {}
+                stats["clinvar_variants_eligible"] = 0
+                stats["clinvar_skipped_out_of_scope"] = 0
 
             gnomad_config = _gnomad_config()
             stats["gnomad_enabled"] = bool(gnomad_config.enabled)
@@ -894,31 +1287,35 @@ def run_annotation_stage(
             stats["gnomad_variants_processed"] = len(variants)
 
             gnomad_errors: list[dict] = []
+            gnomad_rows: list[dict] = []
             gnomad_error_reason_counts: dict[str, int] = {}
             gnomad_error_http_status_counts: dict[str, int] = {}
             gnomad_retry_attempts_total = 0
             gnomad_found_count = 0
             gnomad_not_found_count = 0
+            gnomad_skipped_out_of_scope = 0
 
             if gnomad_config.enabled:
                 for variant in variants:
-                    if _get_run_status(conn, run_id) == "canceled":
-                        conn.execute("BEGIN IMMEDIATE")
-                        clear_dbsnp_evidence_for_run(db_path, run_id, conn=conn, commit=False)
-                        clear_clinvar_evidence_for_run(db_path, run_id, conn=conn, commit=False)
-                        mark_stage_canceled(
-                            db_path,
-                            run_id,
-                            "annotation",
-                            input_uploaded_at=uploaded_at,
-                            conn=conn,
-                            commit=False,
-                        )
-                        conn.commit()
-                        raise StageExecutionError(409, "RUN_CANCELED", "Run was canceled.")
+                    _ensure_annotation_not_canceled(
+                        db_path,
+                        conn,
+                        run_id,
+                        uploaded_at=uploaded_at,
+                    )
 
-                    result = fetch_gnomad_evidence_for_variant(
+                    if not _is_variant_in_evidence_scope(
+                        evidence_profile=evidence_profile,
+                        variant_id=variant.get("variant_id"),
+                        categories_by_variant=categories_by_variant,
+                    ):
+                        gnomad_skipped_out_of_scope += 1
+                        continue
+
+                    result = _fetch_gnomad_evidence(
                         gnomad_config,
+                        evidence_mode=evidence_mode,
+                        local_vcf_path=gnomad_local_vcf_path,
                         chrom=str(variant.get("chrom") or ""),
                         pos=int(variant.get("pos") or 0),
                         ref=str(variant.get("ref") or ""),
@@ -951,28 +1348,73 @@ def run_annotation_stage(
                             }
                         )
 
+                    gnomad_rows.append(
+                        {
+                            "variant_id": variant["variant_id"],
+                            "source": "gnomad",
+                            "outcome": outcome,
+                            "gnomad_variant_id": result.get("gnomad_variant_id"),
+                            "global_af": result.get("global_af"),
+                            "reason_code": result.get("reason_code"),
+                            "reason_message": result.get("reason_message"),
+                            "details": result.get("details") or {},
+                            "retrieved_at": result.get("retrieved_at") or created_at,
+                        }
+                    )
+
                 stats["gnomad_retry_attempts"] = gnomad_retry_attempts_total
                 stats["gnomad_found"] = gnomad_found_count
                 stats["gnomad_not_found"] = gnomad_not_found_count
                 stats["gnomad_errors"] = len(gnomad_errors)
                 stats["gnomad_error_reason_counts"] = gnomad_error_reason_counts
                 stats["gnomad_error_http_status_counts"] = gnomad_error_http_status_counts
+                stats["gnomad_variants_eligible"] = len(variants) - gnomad_skipped_out_of_scope
+                stats["gnomad_skipped_out_of_scope"] = gnomad_skipped_out_of_scope
 
                 if gnomad_errors:
+                    failed_sources.append("gnomad")
+                    gnomad_reason_codes = set(gnomad_error_reason_counts.keys())
+                    hint = "Check gnomAD network connectivity/API availability and retry settings."
+                    if evidence_mode == "offline":
+                        hint = "Check local gnomAD VCF path/index configuration and tabix availability."
+                    elif evidence_mode == "hybrid":
+                        if gnomad_local_vcf_path:
+                            hint = (
+                                "Check local gnomAD VCF path/index configuration and tabix availability; "
+                                "also verify network/API connectivity for hybrid fallback."
+                            )
+                        else:
+                            hint = (
+                                "gnomAD local source is not configured in hybrid mode; "
+                                "current lookup is online. Verify gnomAD API connectivity/retry settings."
+                            )
+                    elif gnomad_reason_codes and gnomad_reason_codes.issubset(
+                        {"GRAPHQL_ERROR", "GRAPHQL_SCHEMA_ERROR"}
+                    ):
+                        hint = (
+                            "Check gnomAD GraphQL query compatibility (dataset/schema), "
+                            "then verify API connectivity and retry settings."
+                        )
                     details = {
                         "errors": gnomad_errors[:10],
                         "error_count": len(gnomad_errors),
                         "timeout_seconds": int(gnomad_config.timeout_seconds),
                         "retry_max_attempts": int(gnomad_config.retry_max_attempts),
                         "retry_attempts_total": gnomad_retry_attempts_total,
-                        "hint": "Check gnomAD network connectivity/API availability and retry settings.",
+                        "hint": hint,
                     }
                     stats["gnomad_error_details"] = details
                     stats["gnomad_warning"] = "gnomAD retrieval had one or more errors."
                     if fail_on_evidence_error:
+                        details = _evidence_failure_details(
+                            details,
+                            failed_source="gnomad",
+                            policy=annotation_evidence_policy,
+                        )
                         conn.execute("BEGIN IMMEDIATE")
                         clear_dbsnp_evidence_for_run(db_path, run_id, conn=conn, commit=False)
                         clear_clinvar_evidence_for_run(db_path, run_id, conn=conn, commit=False)
+                        clear_gnomad_evidence_for_run(db_path, run_id, conn=conn, commit=False)
                         mark_stage_failed(
                             db_path,
                             run_id,
@@ -991,6 +1433,16 @@ def run_annotation_stage(
                             "gnomAD retrieval failed for one or more variants.",
                             details=details,
                         )
+
+                conn.execute("BEGIN IMMEDIATE")
+                _ensure_annotation_not_canceled(
+                    db_path,
+                    conn,
+                    run_id,
+                    uploaded_at=uploaded_at,
+                )
+                upsert_gnomad_evidence_for_run(db_path, run_id, gnomad_rows, conn=conn, commit=False)
+                conn.commit()
             else:
                 stats["gnomad_note"] = "gnomAD retrieval is disabled (SP_GNOMAD_ENABLED=0)."
                 stats["gnomad_retry_attempts"] = 0
@@ -999,8 +1451,17 @@ def run_annotation_stage(
                 stats["gnomad_errors"] = 0
                 stats["gnomad_error_reason_counts"] = {}
                 stats["gnomad_error_http_status_counts"] = {}
+                stats["gnomad_variants_eligible"] = 0
+                stats["gnomad_skipped_out_of_scope"] = 0
 
+            stats["evidence_failed_sources"] = sorted(set(failed_sources))
             conn.execute("BEGIN IMMEDIATE")
+            _ensure_annotation_not_canceled(
+                db_path,
+                conn,
+                run_id,
+                uploaded_at=uploaded_at,
+            )
             mark_stage_succeeded(
                 db_path,
                 run_id,
@@ -1010,6 +1471,14 @@ def run_annotation_stage(
                 conn=conn,
                 commit=False,
             )
+            if is_run_cancel_requested(run_id):
+                conn.rollback()
+                _cancel_annotation_and_raise(
+                    db_path,
+                    conn,
+                    run_id,
+                    uploaded_at=uploaded_at,
+                )
             conn.commit()
         finally:
             conn.close()
@@ -1024,6 +1493,7 @@ def run_annotation_stage(
                 conn.execute("BEGIN IMMEDIATE")
                 clear_dbsnp_evidence_for_run(db_path, run_id, conn=conn, commit=False)
                 clear_clinvar_evidence_for_run(db_path, run_id, conn=conn, commit=False)
+                clear_gnomad_evidence_for_run(db_path, run_id, conn=conn, commit=False)
                 mark_stage_failed(
                     db_path,
                     run_id,
@@ -1036,6 +1506,7 @@ def run_annotation_stage(
                     commit=False,
                 )
                 conn.commit()
+                clear_run_cancel_request(run_id)
             finally:
                 conn.close()
         except Exception:

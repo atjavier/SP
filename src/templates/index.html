@@ -23,6 +23,38 @@
               </div>
             </div>
 
+            <fieldset class="mb-3" aria-describedby="annotation-evidence-policy-help">
+              <legend class="form-label mb-1">Evidence failure behavior</legend>
+              <div class="form-check">
+                <input
+                  class="form-check-input"
+                  type="radio"
+                  name="annotation-evidence-policy"
+                  id="annotation-evidence-policy-stop"
+                  value="stop"
+                />
+                <label class="form-check-label" for="annotation-evidence-policy-stop">
+                  Stop run when an evidence source fails
+                </label>
+              </div>
+              <div class="form-check">
+                <input
+                  class="form-check-input"
+                  type="radio"
+                  name="annotation-evidence-policy"
+                  id="annotation-evidence-policy-continue"
+                  value="continue"
+                  checked
+                />
+                <label class="form-check-label" for="annotation-evidence-policy-continue">
+                  Continue with missing evidence (flag as partial)
+                </label>
+              </div>
+              <div id="annotation-evidence-policy-help" class="form-text">
+                You can change this before starting or before retrying a failed annotation stage.
+              </div>
+            </fieldset>
+
             <div class="d-flex flex-wrap gap-2">
               <button id="start-btn" class="btn btn-primary" type="button">
                 Start
@@ -115,6 +147,9 @@
 
                 <dt class="col-3 text-secondary">Reference build</dt>
                 <dd class="col-9 mb-0"><code id="current-run-reference-build">&mdash;</code></dd>
+
+                <dt class="col-3 text-secondary">Evidence policy</dt>
+                <dd class="col-9 mb-0"><code id="current-run-evidence-policy">&mdash;</code></dd>
               </dl>
 
               <div class="mt-4">

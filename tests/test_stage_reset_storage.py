@@ -404,6 +404,63 @@ class StageResetStorageTestCase(unittest.TestCase):
 
             self.assertEqual(list_clinvar_evidence_for_run(db_path, run_id, limit=10), [])
 
+    def test_reset_stage_and_downstream_clears_gnomad_evidence_when_resetting_annotation(self):
+        from storage.db import init_schema, open_connection  # noqa: E402
+        from storage.gnomad_evidence import (  # noqa: E402
+            list_gnomad_evidence_for_run,
+            upsert_gnomad_evidence_for_run,
+        )
+        from storage.runs import create_run  # noqa: E402
+        from storage.stages import mark_stage_succeeded, reset_stage_and_downstream  # noqa: E402
+
+        uploaded_at = "2026-03-08T00:00:00+00:00"
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = os.path.join(tmpdir, "sp.db")
+            run_id = create_run(db_path)["run_id"]
+
+            mark_stage_succeeded(db_path, run_id, "parser", input_uploaded_at=uploaded_at, stats={"ok": True})
+            mark_stage_succeeded(db_path, run_id, "pre_annotation", input_uploaded_at=uploaded_at, stats={"ok": True})
+            mark_stage_succeeded(db_path, run_id, "classification", input_uploaded_at=uploaded_at, stats={"ok": True})
+            mark_stage_succeeded(db_path, run_id, "prediction", input_uploaded_at=uploaded_at, stats={"ok": True})
+            mark_stage_succeeded(db_path, run_id, "annotation", input_uploaded_at=uploaded_at, stats={"ok": True})
+
+            with open_connection(db_path) as conn:
+                init_schema(conn)
+                conn.execute(
+                    """
+                    INSERT INTO run_variants (
+                      variant_id, run_id, chrom, pos, ref, alt, source_line, created_at
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    ("v1", run_id, "1", 1, "A", "T", 1, uploaded_at),
+                )
+                conn.commit()
+
+            upsert_gnomad_evidence_for_run(
+                db_path,
+                run_id,
+                [
+                    {
+                        "variant_id": "v1",
+                        "source": "gnomad",
+                        "outcome": "found",
+                        "gnomad_variant_id": "1-1-A-T",
+                        "global_af": 0.2,
+                        "reason_code": None,
+                        "reason_message": None,
+                        "details": {"source_line": 1},
+                        "retrieved_at": uploaded_at,
+                    }
+                ],
+            )
+            self.assertEqual(len(list_gnomad_evidence_for_run(db_path, run_id, limit=10)), 1)
+
+            reset_stage_and_downstream(db_path, run_id, "annotation")
+
+            self.assertEqual(list_gnomad_evidence_for_run(db_path, run_id, limit=10), [])
+
     def test_reset_stage_and_downstream_rejects_unknown_stage(self):
         from storage.runs import create_run  # noqa: E402
         from storage.stages import reset_stage_and_downstream  # noqa: E402

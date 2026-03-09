@@ -1,9 +1,13 @@
 (() => {
   const retryFailedStageBtn = document.getElementById("retry-failed-stage-btn");
   const cancelRunBtn = document.getElementById("cancel-run-btn");
+  const evidencePolicyInputs = Array.from(
+    document.querySelectorAll("input[name='annotation-evidence-policy']"),
+  );
   const runIdEl = document.getElementById("current-run-id");
   const statusEl = document.getElementById("current-run-status");
   const referenceBuildEl = document.getElementById("current-run-reference-build");
+  const evidencePolicyEl = document.getElementById("current-run-evidence-policy");
   const stagesEl = document.getElementById("current-run-stages");
   const stagesMessageEl = document.getElementById("current-run-stages-message");
   const messageEl = document.getElementById("run-status-message");
@@ -14,6 +18,7 @@
     !runIdEl ||
     !statusEl ||
     !referenceBuildEl ||
+    !evidencePolicyEl ||
     !stagesEl ||
     !stagesMessageEl ||
     !messageEl ||
@@ -33,6 +38,7 @@
   ];
   let currentRunId = null;
   let currentRunStatus = null;
+  let currentRunEvidencePolicy = null;
   let lastStagesSnapshot = null;
   let eventSource = null;
   let elapsedTimerId = null;
@@ -74,6 +80,20 @@
     if (status === "failed") return "Failed";
     if (status === "canceled") return "Canceled";
     return status;
+  }
+
+  function formatEvidencePolicy(policy) {
+    const normalized = String(policy || "").trim().toLowerCase();
+    if (normalized === "stop") return "stop (fail annotation stage)";
+    if (normalized === "continue") return "continue (allow partial evidence)";
+    return "\u2014";
+  }
+
+  function selectedEvidencePolicy() {
+    for (const input of evidencePolicyInputs) {
+      if (input?.checked) return input.value;
+    }
+    return currentRunEvidencePolicy || "continue";
   }
 
   function clearEl(el) {
@@ -446,6 +466,9 @@
           ) {
             parts.push(`exit_code=${error.details.exit_code}`);
           }
+          if (stageName === "annotation" && error?.details?.failed_source) {
+            parts.push(`failed_source=${error.details.failed_source}`);
+          }
           errorEl.textContent = parts.join(": ");
           errorEl.style.display = "";
         } else {
@@ -509,6 +532,21 @@
     liveUpdatesEl.appendChild(span);
   }
 
+  function dispatchRunChanged(run) {
+    try {
+      window.dispatchEvent(
+        new CustomEvent("sp:run-changed", {
+          detail: {
+            run: run || null,
+            source: "run-controls",
+          },
+        }),
+      );
+    } catch {
+      // ignore event failures
+    }
+  }
+
   function closeEventSource() {
     if (eventSource) {
       try {
@@ -525,10 +563,12 @@
     stopElapsedTimer();
     currentRunId = null;
     currentRunStatus = null;
+    currentRunEvidencePolicy = null;
     lastStagesSnapshot = null;
     runIdEl.textContent = "\u2014";
     statusEl.textContent = formatStatus(null);
     referenceBuildEl.textContent = "\u2014";
+    evidencePolicyEl.textContent = "\u2014";
     updateCancelVisibility(null);
     renderStages(null);
     setStagesMessage("Choose a VCF file and press Start.");
@@ -599,6 +639,9 @@
 
     const referenceBuild = run?.reference_build ?? null;
     referenceBuildEl.textContent = referenceBuild ?? "\u2014";
+    const evidencePolicy = run?.annotation_evidence_policy ?? currentRunEvidencePolicy;
+    currentRunEvidencePolicy = evidencePolicy ?? null;
+    evidencePolicyEl.textContent = formatEvidencePolicy(evidencePolicy);
 
     if (status === "canceled") {
       statusEl.className = "fw-semibold text-danger";
@@ -625,6 +668,7 @@
             status,
             created_at: run?.created_at ?? null,
             reference_build: referenceBuild,
+            annotation_evidence_policy: evidencePolicy ?? null,
           }),
         );
       } else {
@@ -633,12 +677,18 @@
     } catch {
       // ignore storage failures
     }
+
+    dispatchRunChanged(run);
   }
 
-  async function postJson(url) {
+  async function postJson(url, body = null) {
+    const hasBody = body != null;
     const resp = await fetch(url, {
       method: "POST",
-      headers: { Accept: "application/json" },
+      headers: hasBody
+        ? { Accept: "application/json", "Content-Type": "application/json" }
+        : { Accept: "application/json" },
+      body: hasBody ? JSON.stringify(body) : undefined,
     });
     const text = await resp.text();
     let payload = null;
@@ -724,6 +774,20 @@
       retryFailedStageBtn.disabled = true;
       setMessage(null, "");
       try {
+        const requestedPolicy = selectedEvidencePolicy();
+        const { resp: settingsResp, payload: settingsPayload } = await postJson(
+          `/api/v1/runs/${encodeURIComponent(currentRunId)}/settings`,
+          { annotation_evidence_policy: requestedPolicy },
+        );
+        if (!settingsResp.ok || !settingsPayload?.ok) {
+          const msg = settingsPayload?.error?.message ?? "Failed to update run settings.";
+          setMessage("error", msg);
+          return;
+        }
+        if (settingsPayload?.data) {
+          setRun(settingsPayload.data);
+        }
+
         const { resp, payload } = await postJson(
           `/api/v1/runs/${encodeURIComponent(currentRunId)}/stages/${encodeURIComponent(stageName)}/retry`,
         );
@@ -782,6 +846,9 @@
 
   window.addEventListener("sp:run-changed", (evt) => {
     const detail = evt?.detail ?? null;
+    if (detail?.source === "run-controls") {
+      return;
+    }
     const run = detail?.run ?? detail ?? null;
     if (!run?.run_id) {
       setRun(null);

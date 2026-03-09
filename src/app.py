@@ -108,10 +108,69 @@ def create_app(config_overrides: dict[str, Any] | None = None) -> Flask:
 
     @app.post("/api/v1/runs")
     def create_run():
-        from storage.runs import create_run as create_run_record
+        from storage.runs import (
+            create_run as create_run_record,
+            normalize_annotation_evidence_policy,
+        )
+
+        payload = request.get_json(silent=True)
+        if request.is_json:
+            raw_body = request.get_data(cache=True, as_text=False) or b""
+            if raw_body.strip() and payload is None:
+                return (
+                    jsonify(
+                        {
+                            "ok": False,
+                            "error": {
+                                "code": "RUN_CREATE_INVALID",
+                                "message": "Malformed JSON request body.",
+                            },
+                        }
+                    ),
+                    400,
+                )
+        if payload is not None and not isinstance(payload, dict):
+            return (
+                jsonify(
+                    {
+                        "ok": False,
+                        "error": {
+                            "code": "RUN_CREATE_INVALID",
+                            "message": "Request body must be a JSON object.",
+                        },
+                    }
+                ),
+                400,
+            )
+        requested_policy = (
+            payload.get("annotation_evidence_policy")
+            if isinstance(payload, dict)
+            else None
+        )
+        normalized_policy = normalize_annotation_evidence_policy(requested_policy)
+        if requested_policy is not None and normalized_policy is None:
+            return (
+                jsonify(
+                    {
+                        "ok": False,
+                        "error": {
+                            "code": "RUN_CREATE_INVALID",
+                            "message": "Invalid annotation_evidence_policy.",
+                            "details": {
+                                "annotation_evidence_policy": requested_policy,
+                                "allowed_values": ["stop", "continue"],
+                            },
+                        },
+                    }
+                ),
+                400,
+            )
 
         try:
-            record = create_run_record(app.config["SP_DB_PATH"])
+            record = create_run_record(
+                app.config["SP_DB_PATH"],
+                annotation_evidence_policy=normalized_policy,
+            )
         except Exception:
             app.logger.exception("Failed to create run record")
             return (
@@ -161,6 +220,130 @@ def create_app(config_overrides: dict[str, Any] | None = None) -> Flask:
                     }
                 ),
                 404,
+            )
+
+        return jsonify({"ok": True, "data": record})
+
+    @app.post("/api/v1/runs/<run_id>/settings")
+    def update_run_settings(run_id: str):
+        from storage.runs import (
+            RunNotFoundError,
+            RunPolicyNotUpdatableError,
+            normalize_annotation_evidence_policy,
+            update_run_annotation_evidence_policy,
+        )
+
+        payload = request.get_json(silent=True)
+        if request.is_json:
+            raw_body = request.get_data(cache=True, as_text=False) or b""
+            if raw_body.strip() and payload is None:
+                return (
+                    jsonify(
+                        {
+                            "ok": False,
+                            "error": {
+                                "code": "RUN_SETTINGS_INVALID",
+                                "message": "Malformed JSON request body.",
+                            },
+                        }
+                    ),
+                    400,
+                )
+        if payload is None:
+            payload = {}
+        if not isinstance(payload, dict):
+            return (
+                jsonify(
+                    {
+                        "ok": False,
+                        "error": {
+                            "code": "RUN_SETTINGS_INVALID",
+                            "message": "Request body must be a JSON object.",
+                        },
+                    }
+                ),
+                400,
+            )
+
+        requested_policy = payload.get("annotation_evidence_policy")
+        normalized_policy = normalize_annotation_evidence_policy(requested_policy)
+        if normalized_policy is None:
+            return (
+                jsonify(
+                    {
+                        "ok": False,
+                        "error": {
+                            "code": "RUN_SETTINGS_INVALID",
+                            "message": "Invalid annotation_evidence_policy.",
+                            "details": {
+                                "annotation_evidence_policy": requested_policy,
+                                "allowed_values": ["stop", "continue"],
+                            },
+                        },
+                    }
+                ),
+                400,
+            )
+
+        try:
+            record = update_run_annotation_evidence_policy(
+                app.config["SP_DB_PATH"],
+                run_id,
+                annotation_evidence_policy=normalized_policy,
+            )
+        except RunNotFoundError:
+            return (
+                jsonify(
+                    {
+                        "ok": False,
+                        "error": {
+                            "code": "RUN_NOT_FOUND",
+                            "message": "Run not found.",
+                        },
+                    }
+                ),
+                404,
+            )
+        except RunPolicyNotUpdatableError as exc:
+            return (
+                jsonify(
+                    {
+                        "ok": False,
+                        "error": {
+                            "code": "RUN_SETTINGS_NOT_UPDATABLE",
+                            "message": "Run settings cannot be updated while the run is running.",
+                            "details": {"current_status": exc.current_status},
+                        },
+                    }
+                ),
+                409,
+            )
+        except ValueError:
+            return (
+                jsonify(
+                    {
+                        "ok": False,
+                        "error": {
+                            "code": "RUN_SETTINGS_INVALID",
+                            "message": "Invalid run settings.",
+                        },
+                    }
+                ),
+                400,
+            )
+        except Exception:
+            app.logger.exception("Failed to update run settings")
+            return (
+                jsonify(
+                    {
+                        "ok": False,
+                        "error": {
+                            "code": "RUN_SETTINGS_UPDATE_FAILED",
+                            "message": "Failed to update run settings.",
+                        },
+                    }
+                ),
+                500,
             )
 
         return jsonify({"ok": True, "data": record})
@@ -634,6 +817,89 @@ def create_app(config_overrides: dict[str, Any] | None = None) -> Flask:
 
         return jsonify({"ok": True, "data": {"run_id": run_id, "stage": stage or None, "clinvar_evidence": rows}})
 
+    @app.get("/api/v1/runs/<run_id>/gnomad_evidence")
+    def get_run_gnomad_evidence(run_id: str):
+        from storage.gnomad_evidence import list_gnomad_evidence_for_run
+        from storage.runs import get_run as get_run_record
+        from storage.run_inputs import get_run_input
+        from storage.stages import get_stage
+
+        db_path = app.config["SP_DB_PATH"]
+        limit_raw = (request.args.get("limit") or "").strip()
+        limit = 100
+        if limit_raw:
+            try:
+                limit = int(limit_raw)
+            except ValueError:
+                limit = 100
+        limit = max(1, min(limit, 1000))
+        variant_id = (request.args.get("variant_id") or "").strip() or None
+
+        try:
+            run = get_run_record(db_path, run_id)
+        except Exception:
+            app.logger.exception("Failed to fetch run record for gnomAD evidence listing")
+            return (
+                jsonify(
+                    {
+                        "ok": False,
+                        "error": {"code": "RUN_FETCH_FAILED", "message": "Failed to fetch run record."},
+                    }
+                ),
+                500,
+            )
+
+        if not run:
+            return (
+                jsonify({"ok": False, "error": {"code": "RUN_NOT_FOUND", "message": "Run not found."}}),
+                404,
+            )
+
+        run_input = get_run_input(db_path, run_id)
+        latest_uploaded_at = run_input.get("uploaded_at") if run_input else None
+        stage = get_stage(db_path, run_id, "annotation") or {}
+
+        stage_same_input = (
+            bool(latest_uploaded_at)
+            and stage.get("status") == "succeeded"
+            and stage.get("input_uploaded_at") == latest_uploaded_at
+        )
+        if not stage_same_input:
+            return jsonify(
+                {
+                    "ok": True,
+                    "data": {
+                        "run_id": run_id,
+                        "stage": stage or None,
+                        "gnomad_evidence": [],
+                    },
+                }
+            )
+
+        try:
+            rows = list_gnomad_evidence_for_run(
+                db_path,
+                run_id,
+                variant_id=variant_id,
+                limit=limit,
+            )
+        except Exception:
+            app.logger.exception("Failed to fetch gnomAD evidence for run_id=%s", run_id)
+            return (
+                jsonify(
+                    {
+                        "ok": False,
+                        "error": {
+                            "code": "GNOMAD_EVIDENCE_FETCH_FAILED",
+                            "message": "Failed to fetch gnomAD evidence.",
+                        },
+                    }
+                ),
+                500,
+            )
+
+        return jsonify({"ok": True, "data": {"run_id": run_id, "stage": stage or None, "gnomad_evidence": rows}})
+
     @app.get("/api/v1/runs/<run_id>/annotation_output")
     def get_run_annotation_output(run_id: str):
         from storage.run_artifacts import run_artifacts_dir
@@ -910,12 +1176,18 @@ def create_app(config_overrides: dict[str, Any] | None = None) -> Flask:
             return jsonify({"ok": False, "error": error}), exc.http_status
 
         started_stage = prepared.get("started_stage")
+        run = prepared.get("run") or {}
         if started_stage is None:
-            run = prepared.get("run") or {}
             return jsonify(
                 {
                     "ok": True,
-                    "data": {"run_id": run_id, "status": run.get("status"), "started_stage": None},
+                    "data": {
+                        "run_id": run_id,
+                        "status": run.get("status"),
+                        "reference_build": run.get("reference_build"),
+                        "annotation_evidence_policy": run.get("annotation_evidence_policy"),
+                        "started_stage": None,
+                    },
                 }
             )
 
@@ -996,11 +1268,27 @@ def create_app(config_overrides: dict[str, Any] | None = None) -> Flask:
                     set_run_status_if_not_canceled(db_path, run_id, "queued")
                 except Exception:
                     app.logger.exception("Failed to reset run status for run_id=%s", run_id)
+                finally:
+                    try:
+                        from pipeline.cancel_signals import clear_run_cancel_request
+
+                        clear_run_cancel_request(run_id)
+                    except Exception:
+                        app.logger.exception("Failed to clear cancel signal for run_id=%s", run_id)
 
         threading.Thread(target=_background_execute, daemon=True).start()
 
         return jsonify(
-            {"ok": True, "data": {"run_id": run_id, "status": "running", "started_stage": started_stage}}
+            {
+                "ok": True,
+                "data": {
+                    "run_id": run_id,
+                    "status": "running",
+                    "reference_build": run.get("reference_build"),
+                    "annotation_evidence_policy": run.get("annotation_evidence_policy"),
+                    "started_stage": started_stage,
+                },
+            }
         )
 
     @app.post("/api/v1/runs/<run_id>/stages/<stage_name>/retry")
@@ -1245,6 +1533,8 @@ def create_app(config_overrides: dict[str, Any] | None = None) -> Flask:
                         "preserved_stages": preserved_stages,
                         "reset_stages": reset_stages,
                         "status": run.get("status"),
+                        "reference_build": run.get("reference_build"),
+                        "annotation_evidence_policy": run.get("annotation_evidence_policy"),
                         "started_stage": None,
                     },
                 }
@@ -1274,6 +1564,13 @@ def create_app(config_overrides: dict[str, Any] | None = None) -> Flask:
                     set_run_status_if_not_canceled(db_path, run_id, "queued")
                 except Exception:
                     app.logger.exception("Failed to reset run status for run_id=%s", run_id)
+                finally:
+                    try:
+                        from pipeline.cancel_signals import clear_run_cancel_request
+
+                        clear_run_cancel_request(run_id)
+                    except Exception:
+                        app.logger.exception("Failed to clear cancel signal for run_id=%s", run_id)
 
         threading.Thread(target=_background_execute, daemon=True).start()
 
@@ -1286,6 +1583,8 @@ def create_app(config_overrides: dict[str, Any] | None = None) -> Flask:
                     "preserved_stages": preserved_stages,
                     "reset_stages": reset_stages,
                     "status": "running",
+                    "reference_build": run.get("reference_build"),
+                    "annotation_evidence_policy": run.get("annotation_evidence_policy"),
                     "started_stage": started_stage,
                 },
             }
@@ -1293,12 +1592,14 @@ def create_app(config_overrides: dict[str, Any] | None = None) -> Flask:
 
     @app.post("/api/v1/runs/<run_id>/cancel")
     def cancel_run(run_id: str):
+        from pipeline.cancel_signals import request_run_cancel
         from storage.runs import (
             RunNotCancelableError,
             RunNotFoundError,
             cancel_run as cancel_run_record,
         )
 
+        request_run_cancel(run_id)
         try:
             record = cancel_run_record(app.config["SP_DB_PATH"], run_id)
         except RunNotFoundError:

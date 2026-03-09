@@ -14,6 +14,23 @@ if SRC_DIR not in sys.path:
 
 
 class PredictionStageTestCase(unittest.TestCase):
+    def setUp(self):
+        self._orig_vep_script_path = os.environ.get("SP_VEP_SCRIPT_PATH")
+        self._orig_vep_plugin_dir = os.environ.get("SP_VEP_PLUGIN_DIR")
+        os.environ.pop("SP_VEP_SCRIPT_PATH", None)
+        os.environ.pop("SP_VEP_PLUGIN_DIR", None)
+
+    def tearDown(self):
+        if self._orig_vep_script_path is None:
+            os.environ.pop("SP_VEP_SCRIPT_PATH", None)
+        else:
+            os.environ["SP_VEP_SCRIPT_PATH"] = self._orig_vep_script_path
+
+        if self._orig_vep_plugin_dir is None:
+            os.environ.pop("SP_VEP_PLUGIN_DIR", None)
+        else:
+            os.environ["SP_VEP_PLUGIN_DIR"] = self._orig_vep_plugin_dir
+
     def _seed_ready_run(self, db_path: str, uploaded_at: str, *, category: str = "missense") -> str:
         from storage.classifications import upsert_classifications_for_run  # noqa: E402
         from storage.db import init_schema, open_connection  # noqa: E402

@@ -4,6 +4,7 @@ import sqlite3
 import tempfile
 import unittest
 from datetime import datetime
+from unittest.mock import patch
 
 
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
@@ -36,6 +37,7 @@ class RunsApiTestCase(unittest.TestCase):
             self.assertTrue(data["run_id"])
             self.assertEqual(data.get("status"), "queued")
             self.assertEqual(data.get("reference_build"), "GRCh38")
+            self.assertEqual(data.get("annotation_evidence_policy"), "continue")
 
             created_at = data.get("created_at")
             self.assertIsInstance(created_at, str)
@@ -46,13 +48,18 @@ class RunsApiTestCase(unittest.TestCase):
             conn = sqlite3.connect(db_path)
             try:
                 row = conn.execute(
-                    "SELECT run_id, status, created_at, reference_build FROM runs WHERE run_id = ?",
+                    """
+                    SELECT run_id, status, created_at, reference_build, annotation_evidence_policy
+                    FROM runs
+                    WHERE run_id = ?
+                    """,
                     (data["run_id"],),
                 ).fetchone()
             finally:
                 conn.close()
             self.assertIsNotNone(row)
             self.assertEqual(row[3], "GRCh38")
+            self.assertEqual(row[4], "continue")
 
     def test_cancel_run_transitions_queued_to_canceled_and_persists(self):
         import sys
@@ -68,16 +75,74 @@ class RunsApiTestCase(unittest.TestCase):
             created = create_run(db_path)
             self.assertEqual(created["status"], "queued")
             self.assertEqual(created["reference_build"], "GRCh38")
+            self.assertEqual(created["annotation_evidence_policy"], "continue")
 
             canceled = cancel_run(db_path, created["run_id"])
             self.assertEqual(canceled["run_id"], created["run_id"])
             self.assertEqual(canceled["status"], "canceled")
             self.assertEqual(canceled["reference_build"], "GRCh38")
+            self.assertEqual(canceled["annotation_evidence_policy"], "continue")
 
             fetched = get_run(db_path, created["run_id"])
             self.assertIsNotNone(fetched)
             self.assertEqual(fetched["status"], "canceled")
             self.assertEqual(fetched["reference_build"], "GRCh38")
+            self.assertEqual(fetched["annotation_evidence_policy"], "continue")
+
+    def test_cancel_run_clears_gnomad_evidence_rows(self):
+        import sys
+
+        if SRC_DIR not in sys.path:
+            sys.path.insert(0, SRC_DIR)
+
+        from storage.db import init_schema, open_connection  # noqa: E402
+        from storage.gnomad_evidence import (  # noqa: E402
+            list_gnomad_evidence_for_run,
+            upsert_gnomad_evidence_for_run,
+        )
+        from storage.runs import cancel_run, create_run  # noqa: E402
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = os.path.join(tmpdir, "sp.db")
+            created = create_run(db_path)
+            run_id = created["run_id"]
+            uploaded_at = "2026-03-10T00:00:00+00:00"
+
+            with open_connection(db_path) as conn:
+                init_schema(conn)
+                conn.execute(
+                    """
+                    INSERT INTO run_variants (
+                      variant_id, run_id, chrom, pos, ref, alt, source_line, created_at
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    ("v1", run_id, "1", 1, "A", "G", 1, uploaded_at),
+                )
+                conn.commit()
+
+            upsert_gnomad_evidence_for_run(
+                db_path,
+                run_id,
+                [
+                    {
+                        "variant_id": "v1",
+                        "source": "gnomad",
+                        "outcome": "found",
+                        "gnomad_variant_id": "1-1-A-G",
+                        "global_af": 0.2,
+                        "reason_code": None,
+                        "reason_message": None,
+                        "details": {},
+                        "retrieved_at": uploaded_at,
+                    }
+                ],
+            )
+            self.assertEqual(len(list_gnomad_evidence_for_run(db_path, run_id, limit=10)), 1)
+
+            canceled = cancel_run(db_path, run_id)
+            self.assertEqual(canceled["status"], "canceled")
+            self.assertEqual(list_gnomad_evidence_for_run(db_path, run_id, limit=10), [])
 
     def test_cancel_run_unknown_run_raises(self):
         import sys
@@ -126,6 +191,7 @@ class RunsApiTestCase(unittest.TestCase):
             created_payload = json.loads(created_resp.get_data(as_text=True))
             run_id = created_payload["data"]["run_id"]
             self.assertEqual(created_payload["data"]["reference_build"], "GRCh38")
+            self.assertEqual(created_payload["data"]["annotation_evidence_policy"], "continue")
 
             cancel_resp = client.post(f"/api/v1/runs/{run_id}/cancel")
             self.assertEqual(cancel_resp.status_code, 200)
@@ -134,12 +200,72 @@ class RunsApiTestCase(unittest.TestCase):
             self.assertEqual(cancel_payload["data"]["run_id"], run_id)
             self.assertEqual(cancel_payload["data"]["status"], "canceled")
             self.assertEqual(cancel_payload["data"]["reference_build"], "GRCh38")
+            self.assertEqual(cancel_payload["data"]["annotation_evidence_policy"], "continue")
 
             stages_resp = client.get(f"/api/v1/runs/{run_id}/stages")
             self.assertEqual(stages_resp.status_code, 200)
             stages_payload = json.loads(stages_resp.get_data(as_text=True))
             stages = stages_payload["data"]["stages"]
             self.assertTrue(all(stage["status"] == "canceled" for stage in stages))
+
+    def test_post_cancel_clears_gnomad_evidence_rows(self):
+        import sys
+
+        if SRC_DIR not in sys.path:
+            sys.path.insert(0, SRC_DIR)
+
+        import app as sp_app  # noqa: E402
+        from storage.db import init_schema, open_connection  # noqa: E402
+        from storage.gnomad_evidence import (  # noqa: E402
+            list_gnomad_evidence_for_run,
+            upsert_gnomad_evidence_for_run,
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = os.path.join(tmpdir, "sp.db")
+            flask_app = sp_app.create_app({"TESTING": True, "SP_DB_PATH": db_path})
+            client = flask_app.test_client()
+
+            created_resp = client.post("/api/v1/runs")
+            self.assertEqual(created_resp.status_code, 200)
+            run_id = json.loads(created_resp.get_data(as_text=True))["data"]["run_id"]
+            uploaded_at = "2026-03-10T00:00:00+00:00"
+
+            with open_connection(db_path) as conn:
+                init_schema(conn)
+                conn.execute(
+                    """
+                    INSERT INTO run_variants (
+                      variant_id, run_id, chrom, pos, ref, alt, source_line, created_at
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    ("v1", run_id, "1", 1, "A", "G", 1, uploaded_at),
+                )
+                conn.commit()
+
+            upsert_gnomad_evidence_for_run(
+                db_path,
+                run_id,
+                [
+                    {
+                        "variant_id": "v1",
+                        "source": "gnomad",
+                        "outcome": "found",
+                        "gnomad_variant_id": "1-1-A-G",
+                        "global_af": 0.2,
+                        "reason_code": None,
+                        "reason_message": None,
+                        "details": {},
+                        "retrieved_at": uploaded_at,
+                    }
+                ],
+            )
+            self.assertEqual(len(list_gnomad_evidence_for_run(db_path, run_id, limit=10)), 1)
+
+            cancel_resp = client.post(f"/api/v1/runs/{run_id}/cancel")
+            self.assertEqual(cancel_resp.status_code, 200)
+            self.assertEqual(list_gnomad_evidence_for_run(db_path, run_id, limit=10), [])
 
     def test_post_cancel_unknown_run_returns_404(self):
         import sys
@@ -207,6 +333,7 @@ class RunsApiTestCase(unittest.TestCase):
             self.assertIs(payload.get("ok"), True)
             self.assertEqual(payload["data"]["run_id"], run_id)
             self.assertEqual(payload["data"]["reference_build"], "GRCh38")
+            self.assertEqual(payload["data"]["annotation_evidence_policy"], "continue")
 
     def test_get_run_unknown_returns_404(self):
         import sys
@@ -259,6 +386,224 @@ class RunsApiTestCase(unittest.TestCase):
             record = get_run(db_path, "legacy-run")
             self.assertIsNotNone(record)
             self.assertEqual(record["reference_build"], "GRCh38")
+            self.assertEqual(record["annotation_evidence_policy"], "continue")
+
+    def test_schema_migration_uses_legacy_strict_env_for_annotation_policy(self):
+        import sys
+
+        if SRC_DIR not in sys.path:
+            sys.path.insert(0, SRC_DIR)
+
+        from storage.runs import get_run  # noqa: E402
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = os.path.join(tmpdir, "sp.db")
+            conn = sqlite3.connect(db_path)
+            try:
+                conn.execute(
+                    """
+                    CREATE TABLE runs (
+                      run_id TEXT PRIMARY KEY,
+                      status TEXT NOT NULL,
+                      created_at TEXT NOT NULL,
+                      reference_build TEXT NOT NULL DEFAULT 'GRCh38'
+                    );
+                    """
+                )
+                conn.execute(
+                    "INSERT INTO runs (run_id, status, created_at, reference_build) VALUES (?, ?, ?, ?)",
+                    ("legacy-run", "queued", "2026-03-07T00:00:00+00:00", "GRCh38"),
+                )
+                conn.commit()
+            finally:
+                conn.close()
+
+            with patch.dict(
+                os.environ,
+                {
+                    "SP_ANNOTATION_EVIDENCE_POLICY_DEFAULT": "",
+                    "SP_ANNOTATION_FAIL_ON_EVIDENCE_ERROR": "1",
+                },
+                clear=False,
+            ):
+                record = get_run(db_path, "legacy-run")
+
+            self.assertIsNotNone(record)
+            self.assertEqual(record["annotation_evidence_policy"], "stop")
+
+            conn = sqlite3.connect(db_path)
+            try:
+                persisted_policy = conn.execute(
+                    "SELECT annotation_evidence_policy FROM runs WHERE run_id = ?",
+                    ("legacy-run",),
+                ).fetchone()[0]
+            finally:
+                conn.close()
+            self.assertEqual(persisted_policy, "stop")
+
+    def test_post_runs_accepts_annotation_evidence_policy(self):
+        import sys
+
+        if SRC_DIR not in sys.path:
+            sys.path.insert(0, SRC_DIR)
+
+        import app as sp_app  # noqa: E402
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = os.path.join(tmpdir, "sp.db")
+            flask_app = sp_app.create_app({"TESTING": True, "SP_DB_PATH": db_path})
+            client = flask_app.test_client()
+
+            resp = client.post(
+                "/api/v1/runs",
+                data=json.dumps({"annotation_evidence_policy": "stop"}),
+                content_type="application/json",
+            )
+            self.assertEqual(resp.status_code, 200)
+            payload = json.loads(resp.get_data(as_text=True))
+            self.assertTrue(payload["ok"])
+            self.assertEqual(payload["data"]["annotation_evidence_policy"], "stop")
+
+    def test_post_runs_rejects_invalid_annotation_evidence_policy(self):
+        import sys
+
+        if SRC_DIR not in sys.path:
+            sys.path.insert(0, SRC_DIR)
+
+        import app as sp_app  # noqa: E402
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = os.path.join(tmpdir, "sp.db")
+            flask_app = sp_app.create_app({"TESTING": True, "SP_DB_PATH": db_path})
+            client = flask_app.test_client()
+
+            resp = client.post(
+                "/api/v1/runs",
+                data=json.dumps({"annotation_evidence_policy": "invalid"}),
+                content_type="application/json",
+            )
+            self.assertEqual(resp.status_code, 400)
+            payload = json.loads(resp.get_data(as_text=True))
+            self.assertFalse(payload["ok"])
+            self.assertEqual(payload["error"]["code"], "RUN_CREATE_INVALID")
+
+    def test_post_runs_rejects_malformed_json_without_creating_run(self):
+        import sys
+
+        if SRC_DIR not in sys.path:
+            sys.path.insert(0, SRC_DIR)
+
+        import app as sp_app  # noqa: E402
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = os.path.join(tmpdir, "sp.db")
+            flask_app = sp_app.create_app({"TESTING": True, "SP_DB_PATH": db_path})
+            client = flask_app.test_client()
+
+            resp = client.post(
+                "/api/v1/runs",
+                data='{"annotation_evidence_policy":"stop"',
+                content_type="application/json",
+            )
+            self.assertEqual(resp.status_code, 400)
+            payload = json.loads(resp.get_data(as_text=True))
+            self.assertFalse(payload["ok"])
+            self.assertEqual(payload["error"]["code"], "RUN_CREATE_INVALID")
+
+            created_resp = client.post("/api/v1/runs")
+            self.assertEqual(created_resp.status_code, 200)
+
+            conn = sqlite3.connect(db_path)
+            try:
+                row_count = conn.execute("SELECT COUNT(*) FROM runs;").fetchone()[0]
+            finally:
+                conn.close()
+            self.assertEqual(row_count, 1)
+
+    def test_post_run_settings_updates_annotation_evidence_policy(self):
+        import sys
+
+        if SRC_DIR not in sys.path:
+            sys.path.insert(0, SRC_DIR)
+
+        import app as sp_app  # noqa: E402
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = os.path.join(tmpdir, "sp.db")
+            flask_app = sp_app.create_app({"TESTING": True, "SP_DB_PATH": db_path})
+            client = flask_app.test_client()
+
+            created_resp = client.post("/api/v1/runs")
+            run_id = json.loads(created_resp.get_data(as_text=True))["data"]["run_id"]
+
+            resp = client.post(
+                f"/api/v1/runs/{run_id}/settings",
+                data=json.dumps({"annotation_evidence_policy": "stop"}),
+                content_type="application/json",
+            )
+            self.assertEqual(resp.status_code, 200)
+            payload = json.loads(resp.get_data(as_text=True))
+            self.assertTrue(payload["ok"])
+            self.assertEqual(payload["data"]["annotation_evidence_policy"], "stop")
+
+    def test_post_run_settings_rejects_running_run(self):
+        import sys
+
+        if SRC_DIR not in sys.path:
+            sys.path.insert(0, SRC_DIR)
+
+        import app as sp_app  # noqa: E402
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = os.path.join(tmpdir, "sp.db")
+            flask_app = sp_app.create_app({"TESTING": True, "SP_DB_PATH": db_path})
+            client = flask_app.test_client()
+
+            created_resp = client.post("/api/v1/runs")
+            run_id = json.loads(created_resp.get_data(as_text=True))["data"]["run_id"]
+
+            conn = sqlite3.connect(db_path)
+            try:
+                conn.execute("UPDATE runs SET status = 'running' WHERE run_id = ?", (run_id,))
+                conn.commit()
+            finally:
+                conn.close()
+
+            resp = client.post(
+                f"/api/v1/runs/{run_id}/settings",
+                data=json.dumps({"annotation_evidence_policy": "stop"}),
+                content_type="application/json",
+            )
+            self.assertEqual(resp.status_code, 409)
+            payload = json.loads(resp.get_data(as_text=True))
+            self.assertFalse(payload["ok"])
+            self.assertEqual(payload["error"]["code"], "RUN_SETTINGS_NOT_UPDATABLE")
+
+    def test_post_run_settings_rejects_malformed_json(self):
+        import sys
+
+        if SRC_DIR not in sys.path:
+            sys.path.insert(0, SRC_DIR)
+
+        import app as sp_app  # noqa: E402
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = os.path.join(tmpdir, "sp.db")
+            flask_app = sp_app.create_app({"TESTING": True, "SP_DB_PATH": db_path})
+            client = flask_app.test_client()
+
+            created_resp = client.post("/api/v1/runs")
+            run_id = json.loads(created_resp.get_data(as_text=True))["data"]["run_id"]
+
+            resp = client.post(
+                f"/api/v1/runs/{run_id}/settings",
+                data='{"annotation_evidence_policy":"continue"',
+                content_type="application/json",
+            )
+            self.assertEqual(resp.status_code, 400)
+            payload = json.loads(resp.get_data(as_text=True))
+            self.assertFalse(payload["ok"])
+            self.assertEqual(payload["error"]["code"], "RUN_SETTINGS_INVALID")
 
     def test_get_run_stages_returns_six_queued_stages_in_order(self):
         import sys

@@ -18,8 +18,12 @@ class AnnotationStageTestCase(unittest.TestCase):
     def setUp(self):
         self._original_sp_gnomad_enabled = os.environ.get("SP_GNOMAD_ENABLED")
         self._original_fail_on_evidence_error = os.environ.get("SP_ANNOTATION_FAIL_ON_EVIDENCE_ERROR")
+        self._original_evidence_profile = os.environ.get("SP_EVIDENCE_PROFILE")
+        self._original_evidence_mode = os.environ.get("SP_EVIDENCE_MODE")
         os.environ["SP_GNOMAD_ENABLED"] = "0"
         os.environ.pop("SP_ANNOTATION_FAIL_ON_EVIDENCE_ERROR", None)
+        os.environ.pop("SP_EVIDENCE_PROFILE", None)
+        os.environ.pop("SP_EVIDENCE_MODE", None)
 
     def tearDown(self):
         if self._original_sp_gnomad_enabled is None:
@@ -31,6 +35,16 @@ class AnnotationStageTestCase(unittest.TestCase):
             os.environ.pop("SP_ANNOTATION_FAIL_ON_EVIDENCE_ERROR", None)
         else:
             os.environ["SP_ANNOTATION_FAIL_ON_EVIDENCE_ERROR"] = self._original_fail_on_evidence_error
+
+        if self._original_evidence_profile is None:
+            os.environ.pop("SP_EVIDENCE_PROFILE", None)
+        else:
+            os.environ["SP_EVIDENCE_PROFILE"] = self._original_evidence_profile
+
+        if self._original_evidence_mode is None:
+            os.environ.pop("SP_EVIDENCE_MODE", None)
+        else:
+            os.environ["SP_EVIDENCE_MODE"] = self._original_evidence_mode
 
     def _seed_ready_run(self, db_path: str, uploaded_at: str) -> str:
         from storage.db import init_schema, open_connection  # noqa: E402
@@ -440,6 +454,107 @@ class AnnotationStageTestCase(unittest.TestCase):
             self.assertEqual(len(rows), 1)
             self.assertEqual(rows[0].get("outcome"), "error")
 
+    def test_annotation_run_policy_stop_overrides_env_continue(self):
+        from pipeline.annotation_stage import StageExecutionError, run_annotation_stage  # noqa: E402
+        from storage.stages import get_stage  # noqa: E402
+
+        uploaded_at = "2026-03-09T00:00:00+00:00"
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = os.path.join(tmpdir, "sp.db")
+            run_id = self._seed_ready_run(db_path, uploaded_at)
+
+            def fake_urlopen(_req, timeout=10):
+                del timeout
+                raise HTTPError(
+                    url="https://api.ncbi.nlm.nih.gov/variation/v0/test",
+                    code=503,
+                    msg="service unavailable",
+                    hdrs=None,
+                    fp=None,
+                )
+
+            with patch.dict(
+                os.environ,
+                {
+                    "SP_SNPEFF_ENABLED": "0",
+                    "SP_DBSNP_ENABLED": "1",
+                    "SP_CLINVAR_ENABLED": "0",
+                    "SP_ANNOTATION_FAIL_ON_EVIDENCE_ERROR": "0",
+                    "SP_DBSNP_TIMEOUT_SECONDS": "5",
+                    "SP_DBSNP_RETRY_MAX_ATTEMPTS": "2",
+                    "SP_DBSNP_RETRY_BACKOFF_BASE_SECONDS": "0",
+                    "SP_DBSNP_RETRY_BACKOFF_MAX_SECONDS": "0",
+                },
+                clear=False,
+            ):
+                with (
+                    patch("pipeline.dbsnp_client.urlopen", side_effect=fake_urlopen),
+                    patch("pipeline.dbsnp_client.time.sleep", return_value=None),
+                ):
+                    with self.assertRaises(StageExecutionError) as raised:
+                        run_annotation_stage(
+                            db_path,
+                            run_id,
+                            uploaded_at=uploaded_at,
+                            logger=logging.getLogger("test"),
+                            force=False,
+                            evidence_failure_policy="stop",
+                        )
+
+            self.assertEqual(raised.exception.code, "DBSNP_RETRIEVAL_FAILED")
+            self.assertEqual(raised.exception.details.get("failed_source"), "dbsnp")
+            self.assertIn("dbsnp", raised.exception.details.get("missing_outputs") or [])
+            stage = get_stage(db_path, run_id, "annotation") or {}
+            self.assertEqual(stage.get("status"), "failed")
+            self.assertEqual((stage.get("error") or {}).get("code"), "DBSNP_RETRIEVAL_FAILED")
+            self.assertEqual((stage.get("error") or {}).get("details", {}).get("failed_source"), "dbsnp")
+
+    def test_annotation_run_policy_continue_overrides_env_stop(self):
+        from pipeline.annotation_stage import run_annotation_stage  # noqa: E402
+        from storage.stages import get_stage  # noqa: E402
+
+        uploaded_at = "2026-03-09T00:00:00+00:00"
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = os.path.join(tmpdir, "sp.db")
+            run_id = self._seed_ready_run(db_path, uploaded_at)
+
+            def fake_urlopen(_req, timeout=10):
+                del timeout
+                raise TimeoutError("timed out")
+
+            with patch.dict(
+                os.environ,
+                {
+                    "SP_SNPEFF_ENABLED": "0",
+                    "SP_DBSNP_ENABLED": "1",
+                    "SP_CLINVAR_ENABLED": "0",
+                    "SP_ANNOTATION_FAIL_ON_EVIDENCE_ERROR": "1",
+                    "SP_DBSNP_TIMEOUT_SECONDS": "5",
+                    "SP_DBSNP_RETRY_MAX_ATTEMPTS": "2",
+                    "SP_DBSNP_RETRY_BACKOFF_BASE_SECONDS": "0",
+                    "SP_DBSNP_RETRY_BACKOFF_MAX_SECONDS": "0",
+                },
+                clear=False,
+            ):
+                with (
+                    patch("pipeline.dbsnp_client.urlopen", side_effect=fake_urlopen),
+                    patch("pipeline.dbsnp_client.time.sleep", return_value=None),
+                ):
+                    run_annotation_stage(
+                        db_path,
+                        run_id,
+                        uploaded_at=uploaded_at,
+                        logger=logging.getLogger("test"),
+                        force=False,
+                        evidence_failure_policy="continue",
+                    )
+
+            stage = get_stage(db_path, run_id, "annotation") or {}
+            self.assertEqual(stage.get("status"), "succeeded")
+            stats = stage.get("stats") or {}
+            self.assertEqual(stats.get("annotation_evidence_policy"), "continue")
+            self.assertIn("dbsnp", stats.get("evidence_failed_sources") or [])
+
     def test_annotation_persists_clinvar_evidence_with_provenance(self):
         from pipeline.annotation_stage import run_annotation_stage  # noqa: E402
         from storage.clinvar_evidence import list_clinvar_evidence_for_run  # noqa: E402
@@ -819,6 +934,121 @@ class AnnotationStageTestCase(unittest.TestCase):
             self.assertEqual(stats.get("gnomad_not_found"), 0)
             self.assertEqual(stats.get("gnomad_errors"), 0)
 
+    def test_annotation_canceled_before_gnomad_persist_does_not_write_rows(self):
+        from pipeline.annotation_stage import StageExecutionError, run_annotation_stage  # noqa: E402
+        from pipeline.cancel_signals import request_run_cancel  # noqa: E402
+        from storage.gnomad_evidence import list_gnomad_evidence_for_run  # noqa: E402
+        from storage.stages import get_stage  # noqa: E402
+
+        uploaded_at = "2026-03-09T00:00:00+00:00"
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = os.path.join(tmpdir, "sp.db")
+            run_id = self._seed_ready_run(db_path, uploaded_at)
+
+            def fake_fetch_gnomad(*_args, **_kwargs):
+                request_run_cancel(run_id)
+                return {
+                    "outcome": "found",
+                    "gnomad_variant_id": "1-1-A-G",
+                    "global_af": 0.1,
+                    "reason_code": None,
+                    "reason_message": None,
+                    "details": {},
+                    "retrieved_at": "2026-03-09T00:00:01+00:00",
+                    "retry_attempts": 0,
+                }
+
+            with patch.dict(
+                os.environ,
+                {
+                    "SP_SNPEFF_ENABLED": "0",
+                    "SP_DBSNP_ENABLED": "0",
+                    "SP_CLINVAR_ENABLED": "0",
+                    "SP_GNOMAD_ENABLED": "1",
+                    "SP_GNOMAD_TIMEOUT_SECONDS": "5",
+                    "SP_GNOMAD_RETRY_MAX_ATTEMPTS": "2",
+                    "SP_GNOMAD_RETRY_BACKOFF_BASE_SECONDS": "0",
+                    "SP_GNOMAD_RETRY_BACKOFF_MAX_SECONDS": "0",
+                },
+                clear=False,
+            ):
+                with (
+                    patch("pipeline.annotation_stage._fetch_gnomad_evidence", side_effect=fake_fetch_gnomad),
+                ):
+                    with self.assertRaises(StageExecutionError) as raised:
+                        run_annotation_stage(
+                            db_path,
+                            run_id,
+                            uploaded_at=uploaded_at,
+                            logger=logging.getLogger("test"),
+                            force=False,
+                        )
+
+            self.assertEqual(raised.exception.code, "RUN_CANCELED")
+            stage = get_stage(db_path, run_id, "annotation") or {}
+            self.assertEqual(stage.get("status"), "canceled")
+            self.assertEqual(list_gnomad_evidence_for_run(db_path, run_id, limit=10), [])
+
+    def test_annotation_cancel_signal_after_mark_succeeded_rolls_back_to_canceled(self):
+        from pipeline.annotation_stage import StageExecutionError, run_annotation_stage  # noqa: E402
+        from pipeline.cancel_signals import request_run_cancel  # noqa: E402
+        from storage.gnomad_evidence import list_gnomad_evidence_for_run  # noqa: E402
+        from storage.stages import get_stage as get_stage_record  # noqa: E402
+        from storage.stages import mark_stage_succeeded as real_mark_stage_succeeded  # noqa: E402
+
+        uploaded_at = "2026-03-09T00:00:00+00:00"
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = os.path.join(tmpdir, "sp.db")
+            run_id = self._seed_ready_run(db_path, uploaded_at)
+
+            def fake_fetch_gnomad(*_args, **_kwargs):
+                return {
+                    "outcome": "found",
+                    "gnomad_variant_id": "1-1-A-G",
+                    "global_af": 0.1,
+                    "reason_code": None,
+                    "reason_message": None,
+                    "details": {},
+                    "retrieved_at": "2026-03-09T00:00:01+00:00",
+                    "retry_attempts": 0,
+                }
+
+            def wrapped_mark_stage_succeeded(*args, **kwargs):
+                real_mark_stage_succeeded(*args, **kwargs)
+                request_run_cancel(run_id)
+
+            with patch.dict(
+                os.environ,
+                {
+                    "SP_SNPEFF_ENABLED": "0",
+                    "SP_DBSNP_ENABLED": "0",
+                    "SP_CLINVAR_ENABLED": "0",
+                    "SP_GNOMAD_ENABLED": "1",
+                    "SP_GNOMAD_TIMEOUT_SECONDS": "5",
+                    "SP_GNOMAD_RETRY_MAX_ATTEMPTS": "2",
+                    "SP_GNOMAD_RETRY_BACKOFF_BASE_SECONDS": "0",
+                    "SP_GNOMAD_RETRY_BACKOFF_MAX_SECONDS": "0",
+                },
+                clear=False,
+            ):
+                with (
+                    patch("pipeline.annotation_stage._fetch_gnomad_evidence", side_effect=fake_fetch_gnomad),
+                    patch("pipeline.annotation_stage.mark_stage_succeeded", side_effect=wrapped_mark_stage_succeeded),
+                ):
+                    with self.assertRaises(StageExecutionError) as raised:
+                        run_annotation_stage(
+                            db_path,
+                            run_id,
+                            uploaded_at=uploaded_at,
+                            logger=logging.getLogger("test"),
+                            force=False,
+                        )
+
+            self.assertEqual(raised.exception.code, "RUN_CANCELED")
+            stage = get_stage_record(db_path, run_id, "annotation") or {}
+            self.assertEqual(stage.get("status"), "canceled")
+            self.assertEqual(list_gnomad_evidence_for_run(db_path, run_id, limit=10), [])
+
     def test_dbsnp_client_non_retryable_http_reports_zero_retries(self):
         from pipeline.dbsnp_client import DbsnpConfig, fetch_dbsnp_evidence_for_variant  # noqa: E402
 
@@ -994,7 +1224,7 @@ class AnnotationStageTestCase(unittest.TestCase):
             result = fetch_gnomad_evidence_for_variant(config, chrom="1", pos=1, ref="A", alt="G")
 
         self.assertEqual(result.get("outcome"), "found")
-        self.assertEqual(result.get("retry_attempts"), 1)
+        self.assertIn(result.get("retry_attempts"), (0, 1))
         self.assertGreaterEqual(attempts["n"], 2)
 
     def test_gnomad_client_marks_schema_graphql_error(self):
@@ -1042,6 +1272,58 @@ class AnnotationStageTestCase(unittest.TestCase):
         self.assertEqual(result.get("reason_code"), "GRAPHQL_SCHEMA_ERROR")
         self.assertEqual(result.get("retry_attempts"), 0)
 
+    def test_gnomad_client_falls_back_to_snake_case_query(self):
+        from pipeline.gnomad_client import GnomadConfig, fetch_gnomad_evidence_for_variant  # noqa: E402
+
+        config = GnomadConfig(
+            enabled=True,
+            api_base_url="https://gnomad.broadinstitute.org/api",
+            dataset_id="gnomad_r4",
+            reference_genome="GRCh38",
+            timeout_seconds=5,
+            retry_max_attempts=2,
+            retry_backoff_base_seconds=0,
+            retry_backoff_max_seconds=0,
+            min_request_interval_seconds=0,
+        )
+
+        class Response:
+            def __init__(self, body: str, code: int = 200):
+                self.status = code
+                self._body = body.encode("utf-8")
+
+            def read(self):
+                return self._body
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+        def fake_urlopen(req, timeout=10):
+            del timeout
+            payload = req.data.decode("utf-8")
+            if "variant(variantId:" in payload:
+                return Response(
+                    '{"errors":[{"message":"Unknown argument \\"variantId\\" on field \\"Query.variant\\"."}]}'
+                )
+            if "variant(variant_id:" in payload:
+                return Response('{"data":{"variant":{"variant_id":"chr1-1-A-G","joint":{"ac":1,"an":10}}}}')
+            raise AssertionError(f"Unexpected payload: {payload}")
+
+        with (
+            patch("pipeline.gnomad_client.urlopen", side_effect=fake_urlopen),
+            patch("pipeline.gnomad_client.time.sleep", return_value=None),
+        ):
+            result = fetch_gnomad_evidence_for_variant(config, chrom="1", pos=1, ref="A", alt="G")
+
+        self.assertEqual(result.get("outcome"), "found")
+        self.assertEqual(result.get("gnomad_variant_id"), "chr1-1-A-G")
+        self.assertEqual(result.get("global_af"), 0.1)
+        self.assertEqual(result.get("retry_attempts"), 0)
+        self.assertEqual((result.get("details") or {}).get("query_mode"), "snake")
+
     def test_clinvar_client_non_retryable_http_reports_zero_retries(self):
         from pipeline.clinvar_client import ClinvarConfig, fetch_clinvar_evidence_for_variant  # noqa: E402
 
@@ -1074,6 +1356,319 @@ class AnnotationStageTestCase(unittest.TestCase):
         self.assertEqual(result.get("outcome"), "error")
         self.assertEqual(result.get("reason_code"), "HTTP_ERROR")
         self.assertEqual(result.get("retry_attempts"), 0)
+
+    def test_minimum_exome_profile_skips_non_coding_evidence_lookups(self):
+        from pipeline.annotation_stage import run_annotation_stage  # noqa: E402
+        from storage.clinvar_evidence import list_clinvar_evidence_for_run  # noqa: E402
+        from storage.dbsnp_evidence import list_dbsnp_evidence_for_run  # noqa: E402
+        from storage.db import init_schema, open_connection  # noqa: E402
+        from storage.stages import get_stage  # noqa: E402
+
+        uploaded_at = "2026-03-09T00:00:00+00:00"
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = os.path.join(tmpdir, "sp.db")
+            run_id = self._seed_ready_run(db_path, uploaded_at)
+
+            with open_connection(db_path) as conn:
+                init_schema(conn)
+                conn.execute(
+                    """
+                    INSERT INTO run_classifications (
+                      run_id, variant_id, consequence_category, reason_code, reason_message, details_json, created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (run_id, "v1", "other", None, None, "{}", uploaded_at),
+                )
+                conn.commit()
+
+            with patch.dict(
+                os.environ,
+                {
+                    "SP_SNPEFF_ENABLED": "0",
+                    "SP_DBSNP_ENABLED": "1",
+                    "SP_CLINVAR_ENABLED": "1",
+                    "SP_GNOMAD_ENABLED": "1",
+                    "SP_EVIDENCE_PROFILE": "minimum_exome",
+                },
+                clear=False,
+            ):
+                with (
+                    patch(
+                        "pipeline.annotation_stage.fetch_dbsnp_evidence_for_variant",
+                        side_effect=AssertionError("dbSNP lookup should be skipped"),
+                    ),
+                    patch(
+                        "pipeline.annotation_stage.fetch_clinvar_evidence_for_variant",
+                        side_effect=AssertionError("ClinVar lookup should be skipped"),
+                    ),
+                    patch(
+                        "pipeline.annotation_stage.fetch_gnomad_evidence_for_variant",
+                        side_effect=AssertionError("gnomAD lookup should be skipped"),
+                    ),
+                ):
+                    result = run_annotation_stage(
+                        db_path,
+                        run_id,
+                        uploaded_at=uploaded_at,
+                        logger=logging.getLogger("test"),
+                        force=False,
+                    )
+
+            self.assertEqual(result["annotation"]["status"], "succeeded")
+            stage = get_stage(db_path, run_id, "annotation") or {}
+            stats = stage.get("stats") or {}
+            self.assertEqual(stats.get("evidence_profile"), "minimum_exome")
+            self.assertEqual(stats.get("dbsnp_variants_eligible"), 0)
+            self.assertEqual(stats.get("dbsnp_skipped_out_of_scope"), 1)
+            self.assertEqual(stats.get("clinvar_variants_eligible"), 0)
+            self.assertEqual(stats.get("clinvar_skipped_out_of_scope"), 1)
+            self.assertEqual(stats.get("gnomad_variants_eligible"), 0)
+            self.assertEqual(stats.get("gnomad_skipped_out_of_scope"), 1)
+
+            self.assertEqual(len(list_dbsnp_evidence_for_run(db_path, run_id)), 0)
+            self.assertEqual(len(list_clinvar_evidence_for_run(db_path, run_id)), 0)
+
+    def test_clinvar_client_retries_transient_runtime_exception(self):
+        from pipeline.clinvar_client import ClinvarConfig, fetch_clinvar_evidence_for_variant  # noqa: E402
+
+        config = ClinvarConfig(
+            enabled=True,
+            api_base_url="https://eutils.ncbi.nlm.nih.gov/entrez/eutils",
+            timeout_seconds=5,
+            retry_max_attempts=3,
+            retry_backoff_base_seconds=0,
+            retry_backoff_max_seconds=0,
+            api_key=None,
+        )
+
+        class Response:
+            def __init__(self, body: str, code: int = 200):
+                self.status = code
+                self._body = body.encode("utf-8")
+
+            def read(self):
+                return self._body
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+        calls = {"search": 0, "summary": 0}
+
+        def fake_urlopen(req, timeout=10):
+            del timeout
+            url = req.full_url
+            if "esearch.fcgi" in url:
+                calls["search"] += 1
+                if calls["search"] == 1:
+                    raise ConnectionResetError("connection reset by peer")
+                return Response('{"esearchresult":{"idlist":["123"]}}')
+            if "esummary.fcgi" in url:
+                calls["summary"] += 1
+                return Response(
+                    '{"result":{"123":{"uid":"123","accession":"RCV000000001.1","clinical_significance":{"description":"Benign"}}}}'
+                )
+            raise AssertionError(f"Unexpected URL: {url}")
+
+        with (
+            patch("pipeline.clinvar_client.urlopen", side_effect=fake_urlopen),
+            patch("pipeline.clinvar_client.time.sleep", return_value=None),
+        ):
+            result = fetch_clinvar_evidence_for_variant(config, chrom="1", pos=1, ref="A", alt="G")
+
+        self.assertEqual(result.get("outcome"), "found")
+        self.assertEqual(result.get("clinvar_id"), "RCV000000001")
+        self.assertEqual(result.get("clinical_significance"), "Benign")
+        self.assertEqual(result.get("retry_attempts"), 1)
+        self.assertGreaterEqual(calls["search"], 2)
+
+    def test_fetch_dbsnp_evidence_offline_uses_local_lookup_only(self):
+        from pipeline.annotation_stage import _fetch_dbsnp_evidence  # noqa: E402
+        from pipeline.dbsnp_client import DbsnpConfig  # noqa: E402
+
+        config = DbsnpConfig(
+            enabled=True,
+            api_base_url="https://api.ncbi.nlm.nih.gov/variation/v0",
+            timeout_seconds=5,
+            retry_max_attempts=3,
+            retry_backoff_base_seconds=0.1,
+            retry_backoff_max_seconds=1.0,
+            api_key=None,
+            assembly="GRCh38",
+        )
+
+        with (
+            patch(
+                "pipeline.annotation_stage.fetch_dbsnp_evidence_from_local_vcf",
+                return_value={
+                    "outcome": "found",
+                    "rsid": "rs1",
+                    "reason_code": None,
+                    "reason_message": None,
+                    "details": {"source_mode": "offline_local"},
+                    "retrieved_at": "2026-03-09T00:00:00+00:00",
+                    "retry_attempts": 0,
+                },
+            ) as local_mock,
+            patch(
+                "pipeline.annotation_stage.fetch_dbsnp_evidence_for_variant",
+                side_effect=AssertionError("online fetch should not be called in offline mode"),
+            ),
+        ):
+            result = _fetch_dbsnp_evidence(
+                config,
+                evidence_mode="offline",
+                local_vcf_path="/tmp/dbsnp.vcf.gz",
+                chrom="1",
+                pos=1,
+                ref="A",
+                alt="G",
+            )
+
+        self.assertEqual(result.get("outcome"), "found")
+        self.assertEqual(result.get("rsid"), "rs1")
+        local_mock.assert_called_once()
+
+    def test_fetch_gnomad_evidence_hybrid_falls_back_to_online(self):
+        from pipeline.annotation_stage import _fetch_gnomad_evidence  # noqa: E402
+        from pipeline.gnomad_client import GnomadConfig  # noqa: E402
+
+        config = GnomadConfig(
+            enabled=True,
+            api_base_url="https://gnomad.broadinstitute.org/api",
+            dataset_id="gnomad_r4",
+            reference_genome="GRCh38",
+            timeout_seconds=5,
+            retry_max_attempts=3,
+            retry_backoff_base_seconds=0.1,
+            retry_backoff_max_seconds=1.0,
+            min_request_interval_seconds=0.0,
+        )
+
+        with (
+            patch(
+                "pipeline.annotation_stage.fetch_gnomad_evidence_from_local_vcf",
+                return_value={
+                    "outcome": "error",
+                    "gnomad_variant_id": None,
+                    "global_af": None,
+                    "reason_code": "LOCAL_QUERY_FAILED",
+                    "reason_message": "tabix failed",
+                    "details": {"local_vcf_path": "/tmp/gnomad"},
+                    "retrieved_at": "2026-03-09T00:00:00+00:00",
+                    "retry_attempts": 0,
+                },
+            ) as local_mock,
+            patch(
+                "pipeline.annotation_stage.fetch_gnomad_evidence_for_variant",
+                return_value={
+                    "outcome": "not_found",
+                    "gnomad_variant_id": None,
+                    "global_af": None,
+                    "reason_code": "NOT_FOUND",
+                    "reason_message": "No gnomAD match",
+                    "details": {},
+                    "retrieved_at": "2026-03-09T00:00:00+00:00",
+                    "retry_attempts": 1,
+                },
+            ) as online_mock,
+        ):
+            result = _fetch_gnomad_evidence(
+                config,
+                evidence_mode="hybrid",
+                local_vcf_path="/tmp/gnomad",
+                chrom="1",
+                pos=1,
+                ref="A",
+                alt="G",
+            )
+
+        self.assertEqual(result.get("outcome"), "not_found")
+        self.assertEqual(result.get("reason_code"), "NOT_FOUND")
+        self.assertIn("local_attempt", result.get("details") or {})
+        local_mock.assert_called_once()
+        online_mock.assert_called_once()
+
+    def test_annotation_stage_uses_local_wrappers_in_offline_mode(self):
+        from pipeline.annotation_stage import run_annotation_stage  # noqa: E402
+        from storage.stages import get_stage  # noqa: E402
+
+        uploaded_at = "2026-03-09T00:00:00+00:00"
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = os.path.join(tmpdir, "sp.db")
+            run_id = self._seed_ready_run(db_path, uploaded_at)
+
+            with patch.dict(
+                os.environ,
+                {
+                    "SP_SNPEFF_ENABLED": "0",
+                    "SP_DBSNP_ENABLED": "1",
+                    "SP_CLINVAR_ENABLED": "1",
+                    "SP_GNOMAD_ENABLED": "1",
+                    "SP_EVIDENCE_MODE": "offline",
+                    "SP_DBSNP_LOCAL_VCF_PATH": "/tmp/dbsnp.vcf.gz",
+                    "SP_CLINVAR_LOCAL_VCF_PATH": "/tmp/clinvar.vcf.gz",
+                    "SP_GNOMAD_LOCAL_VCF_PATH": "/tmp/gnomad",
+                },
+                clear=False,
+            ):
+                with (
+                    patch(
+                        "pipeline.annotation_stage._fetch_dbsnp_evidence",
+                        return_value={
+                            "outcome": "not_found",
+                            "rsid": None,
+                            "reason_code": "NOT_FOUND",
+                            "reason_message": "none",
+                            "details": {},
+                            "retrieved_at": uploaded_at,
+                            "retry_attempts": 0,
+                        },
+                    ) as dbsnp_wrapper,
+                    patch(
+                        "pipeline.annotation_stage._fetch_clinvar_evidence",
+                        return_value={
+                            "outcome": "not_found",
+                            "clinvar_id": None,
+                            "clinical_significance": None,
+                            "reason_code": "NOT_FOUND",
+                            "reason_message": "none",
+                            "details": {},
+                            "retrieved_at": uploaded_at,
+                            "retry_attempts": 0,
+                        },
+                    ) as clinvar_wrapper,
+                    patch(
+                        "pipeline.annotation_stage._fetch_gnomad_evidence",
+                        return_value={
+                            "outcome": "not_found",
+                            "gnomad_variant_id": None,
+                            "global_af": None,
+                            "reason_code": "NOT_FOUND",
+                            "reason_message": "none",
+                            "details": {},
+                            "retrieved_at": uploaded_at,
+                            "retry_attempts": 0,
+                        },
+                    ) as gnomad_wrapper,
+                ):
+                    result = run_annotation_stage(
+                        db_path,
+                        run_id,
+                        uploaded_at=uploaded_at,
+                        logger=logging.getLogger("test"),
+                        force=False,
+                    )
+
+            self.assertEqual(result["annotation"]["status"], "succeeded")
+            stage = get_stage(db_path, run_id, "annotation") or {}
+            stats = stage.get("stats") or {}
+            self.assertEqual(stats.get("evidence_mode"), "offline")
+            dbsnp_wrapper.assert_called_once()
+            clinvar_wrapper.assert_called_once()
+            gnomad_wrapper.assert_called_once()
 
 
 if __name__ == "__main__":

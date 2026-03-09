@@ -535,6 +535,109 @@ class OrchestratorApiTestCase(unittest.TestCase):
             self.assertIs(stale_payload.get("ok"), True)
             self.assertEqual(stale_payload["data"]["clinvar_evidence"], [])
 
+    def test_gnomad_evidence_endpoint_is_stage_gated_to_latest_upload(self):
+        vcf_bytes = b"#CHROM\tPOS\tREF\tALT\n1\t1\tA\tG\n1\t2\tC\tT\n"
+        vcf_bytes_new = b"#CHROM\tPOS\tREF\tALT\n1\t2\tA\tT\n"
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = os.path.join(tmpdir, "sp.db")
+            client = self._create_client(db_path)
+
+            run_id = self._create_run(client)
+            upload_payload = json.loads(self._upload(client, run_id, vcf_bytes).get_data(as_text=True))
+            uploaded_at = upload_payload["data"]["uploaded_at"]
+
+            class Response:
+                def __init__(self, body: str, code: int = 200):
+                    self.status = code
+                    self._body = body.encode("utf-8")
+
+                def read(self):
+                    return self._body
+
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, exc_type, exc, tb):
+                    return False
+
+            def fake_urlopen(req, timeout=10):
+                del timeout
+                payload = json.loads((req.data or b"{}").decode("utf-8"))
+                variant_id = (((payload.get("variables") or {}).get("variantId")) or "1-1-A-G")
+                return Response(
+                    json.dumps(
+                        {
+                            "data": {
+                                "variant": {
+                                    "variantId": variant_id,
+                                    "genome": {"af": 0.01},
+                                }
+                            }
+                        }
+                    )
+                )
+
+            with patch.dict(
+                os.environ,
+                {
+                    "SP_SNPEFF_ENABLED": "0",
+                    "SP_DBSNP_ENABLED": "0",
+                    "SP_CLINVAR_ENABLED": "0",
+                    "SP_GNOMAD_ENABLED": "1",
+                    "SP_GNOMAD_TIMEOUT_SECONDS": "5",
+                    "SP_GNOMAD_RETRY_MAX_ATTEMPTS": "3",
+                    "SP_GNOMAD_RETRY_BACKOFF_BASE_SECONDS": "0",
+                    "SP_GNOMAD_RETRY_BACKOFF_MAX_SECONDS": "0",
+                    "SP_GNOMAD_MIN_REQUEST_INTERVAL_SECONDS": "0",
+                },
+                clear=False,
+            ):
+                with (
+                    patch("pipeline.gnomad_client.urlopen", side_effect=fake_urlopen),
+                    patch("pipeline.gnomad_client.time.sleep", return_value=None),
+                ):
+                    self.assertEqual(client.post(f"/api/v1/runs/{run_id}/start").status_code, 200)
+                    self.assertEqual(self._wait_for_run_not_running(client, run_id), "queued")
+
+            listing = client.get(f"/api/v1/runs/{run_id}/gnomad_evidence?limit=50")
+            self.assertEqual(listing.status_code, 200)
+            payload = json.loads(listing.get_data(as_text=True))
+            self.assertIs(payload.get("ok"), True)
+            self.assertEqual(payload["data"]["run_id"], run_id)
+            self.assertEqual(payload["data"]["stage"]["status"], "succeeded")
+            self.assertIn("gnomad_evidence", payload["data"])
+            rows = payload["data"]["gnomad_evidence"]
+            self.assertEqual(len(rows), 2)
+            self.assertTrue(all(row["source"] == "gnomad" for row in rows))
+            self.assertTrue(all(row["outcome"] == "found" for row in rows))
+
+            variant_id = rows[0]["variant_id"]
+            by_variant_listing = client.get(f"/api/v1/runs/{run_id}/gnomad_evidence?variant_id={variant_id}&limit=50")
+            self.assertEqual(by_variant_listing.status_code, 200)
+            by_variant_payload = json.loads(by_variant_listing.get_data(as_text=True))
+            self.assertIs(by_variant_payload.get("ok"), True)
+            self.assertEqual(len(by_variant_payload["data"]["gnomad_evidence"]), 1)
+            self.assertEqual(by_variant_payload["data"]["gnomad_evidence"][0]["variant_id"], variant_id)
+
+            limited_listing = client.get(f"/api/v1/runs/{run_id}/gnomad_evidence?limit=1")
+            self.assertEqual(limited_listing.status_code, 200)
+            limited_payload = json.loads(limited_listing.get_data(as_text=True))
+            self.assertIs(limited_payload.get("ok"), True)
+            self.assertEqual(len(limited_payload["data"]["gnomad_evidence"]), 1)
+
+            upload_payload_2 = json.loads(self._upload(client, run_id, vcf_bytes_new).get_data(as_text=True))
+            uploaded_at_2 = upload_payload_2["data"]["uploaded_at"]
+            if uploaded_at_2 == uploaded_at:
+                upload_payload_2 = json.loads(self._upload(client, run_id, vcf_bytes_new).get_data(as_text=True))
+                uploaded_at_2 = upload_payload_2["data"]["uploaded_at"]
+            self.assertNotEqual(uploaded_at, uploaded_at_2)
+
+            stale_listing = client.get(f"/api/v1/runs/{run_id}/gnomad_evidence?limit=50")
+            self.assertEqual(stale_listing.status_code, 200)
+            stale_payload = json.loads(stale_listing.get_data(as_text=True))
+            self.assertIs(stale_payload.get("ok"), True)
+            self.assertEqual(stale_payload["data"]["gnomad_evidence"], [])
+
     def test_start_begins_at_pre_annotation_when_parser_already_succeeded(self):
         vcf_bytes = b"#CHROM\tPOS\tREF\tALT\n1\t1\tA\tT\n"
         with tempfile.TemporaryDirectory() as tmpdir:

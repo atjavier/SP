@@ -11,7 +11,8 @@ SCHEMA_STATEMENTS: tuple[str, ...] = (
       run_id TEXT PRIMARY KEY,
       status TEXT NOT NULL,
       created_at TEXT NOT NULL,
-      reference_build TEXT NOT NULL DEFAULT 'GRCh38'
+      reference_build TEXT NOT NULL DEFAULT 'GRCh38',
+      annotation_evidence_policy TEXT NOT NULL DEFAULT 'continue'
     );
     """,
     """
@@ -471,10 +472,131 @@ SCHEMA_STATEMENTS: tuple[str, ...] = (
         END;
     END;
     """,
+    """
+    CREATE TABLE IF NOT EXISTS run_gnomad_evidence (
+      run_id TEXT NOT NULL,
+      variant_id TEXT NOT NULL,
+      source TEXT NOT NULL,
+      outcome TEXT NOT NULL,
+      gnomad_variant_id TEXT,
+      global_af REAL,
+      reason_code TEXT,
+      reason_message TEXT,
+      details_json TEXT NOT NULL,
+      retrieved_at TEXT NOT NULL,
+      PRIMARY KEY (run_id, variant_id, source),
+      FOREIGN KEY (run_id) REFERENCES runs(run_id),
+      FOREIGN KEY (variant_id) REFERENCES run_variants(variant_id) ON DELETE CASCADE
+    );
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_run_gnomad_evidence_run_id ON run_gnomad_evidence(run_id);",
+    "CREATE INDEX IF NOT EXISTS idx_run_gnomad_evidence_source ON run_gnomad_evidence(source);",
+    """
+    CREATE TRIGGER IF NOT EXISTS trg_run_gnomad_evidence_run_match_insert
+    BEFORE INSERT ON run_gnomad_evidence
+    FOR EACH ROW
+    BEGIN
+      SELECT
+        CASE
+          WHEN (SELECT run_id FROM run_variants WHERE variant_id = NEW.variant_id) != NEW.run_id
+          THEN RAISE(ABORT, 'RUN_VARIANT_MISMATCH')
+        END;
+    END;
+    """,
+    """
+    CREATE TRIGGER IF NOT EXISTS trg_run_gnomad_evidence_run_match_update
+    BEFORE UPDATE OF run_id, variant_id ON run_gnomad_evidence
+    FOR EACH ROW
+    BEGIN
+      SELECT
+        CASE
+          WHEN (SELECT run_id FROM run_variants WHERE variant_id = NEW.variant_id) != NEW.run_id
+          THEN RAISE(ABORT, 'RUN_VARIANT_MISMATCH')
+        END;
+    END;
+    """,
+    """
+    CREATE TRIGGER IF NOT EXISTS trg_run_gnomad_evidence_validate_insert
+    BEFORE INSERT ON run_gnomad_evidence
+    FOR EACH ROW
+    BEGIN
+      SELECT
+        CASE
+          WHEN NEW.source != 'gnomad'
+          THEN RAISE(ABORT, 'INVALID_GNOMAD_SOURCE')
+        END;
+      SELECT
+        CASE
+          WHEN NEW.outcome NOT IN ('found', 'not_found', 'error')
+          THEN RAISE(ABORT, 'INVALID_GNOMAD_OUTCOME')
+        END;
+      SELECT
+        CASE
+          WHEN NEW.outcome = 'found' AND NEW.gnomad_variant_id IS NULL
+          THEN RAISE(ABORT, 'MISSING_GNOMAD_VARIANT_ID')
+        END;
+      SELECT
+        CASE
+          WHEN NEW.outcome IN ('not_found', 'error') AND NEW.gnomad_variant_id IS NOT NULL
+          THEN RAISE(ABORT, 'GNOMAD_VARIANT_ID_MUST_BE_NULL')
+        END;
+    END;
+    """,
+    """
+    CREATE TRIGGER IF NOT EXISTS trg_run_gnomad_evidence_validate_update
+    BEFORE UPDATE OF source, outcome, gnomad_variant_id ON run_gnomad_evidence
+    FOR EACH ROW
+    BEGIN
+      SELECT
+        CASE
+          WHEN NEW.source != 'gnomad'
+          THEN RAISE(ABORT, 'INVALID_GNOMAD_SOURCE')
+        END;
+      SELECT
+        CASE
+          WHEN NEW.outcome NOT IN ('found', 'not_found', 'error')
+          THEN RAISE(ABORT, 'INVALID_GNOMAD_OUTCOME')
+        END;
+      SELECT
+        CASE
+          WHEN NEW.outcome = 'found' AND NEW.gnomad_variant_id IS NULL
+          THEN RAISE(ABORT, 'MISSING_GNOMAD_VARIANT_ID')
+        END;
+      SELECT
+        CASE
+          WHEN NEW.outcome IN ('not_found', 'error') AND NEW.gnomad_variant_id IS NOT NULL
+          THEN RAISE(ABORT, 'GNOMAD_VARIANT_ID_MUST_BE_NULL')
+        END;
+    END;
+    """,
 )
 
 _SCHEMA_INIT_LOCK = threading.Lock()
 _SCHEMA_INIT_CACHE: set[str] = set()
+
+
+def _truthy_env(name: str) -> bool:
+    value = (os.environ.get(name) or "").strip().lower()
+    return value in {"1", "true", "yes", "y", "on"}
+
+
+def _normalize_annotation_evidence_policy(value: str | None) -> str | None:
+    text = (value or "").strip().lower()
+    if text in {"stop", "continue"}:
+        return text
+    return None
+
+
+def _default_annotation_evidence_policy_for_migration() -> str:
+    explicit = _normalize_annotation_evidence_policy(
+        os.environ.get("SP_ANNOTATION_EVIDENCE_POLICY_DEFAULT")
+    )
+    if explicit:
+        return explicit
+    legacy = os.environ.get("SP_ANNOTATION_FAIL_ON_EVIDENCE_ERROR")
+    if legacy is None:
+        return "continue"
+    return "stop" if _truthy_env("SP_ANNOTATION_FAIL_ON_EVIDENCE_ERROR") else "continue"
 
 
 def ensure_parent_dir(path: str) -> None:
@@ -535,6 +657,7 @@ def _connection_cache_key(conn: sqlite3.Connection) -> str:
 
 def _apply_schema_migrations(conn: sqlite3.Connection) -> None:
     _ensure_runs_reference_build_column(conn)
+    _ensure_runs_annotation_evidence_policy_column(conn)
     _normalize_stage_status_vocabulary(conn)
 
 
@@ -555,3 +678,40 @@ def _ensure_runs_reference_build_column(conn: sqlite3.Connection) -> None:
     if "reference_build" in columns:
         return
     conn.execute("ALTER TABLE runs ADD COLUMN reference_build TEXT NOT NULL DEFAULT 'GRCh38';")
+
+
+def _ensure_runs_annotation_evidence_policy_column(conn: sqlite3.Connection) -> None:
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(runs);").fetchall()}
+    fallback_policy = _default_annotation_evidence_policy_for_migration()
+    if "annotation_evidence_policy" not in columns:
+        conn.execute(
+            "ALTER TABLE runs ADD COLUMN annotation_evidence_policy TEXT NOT NULL DEFAULT 'continue';"
+        )
+        if fallback_policy != "continue":
+            conn.execute(
+                "UPDATE runs SET annotation_evidence_policy = ?",
+                (fallback_policy,),
+            )
+        return
+
+    has_invalid = conn.execute(
+        """
+        SELECT 1
+        FROM runs
+        WHERE annotation_evidence_policy IS NULL
+           OR annotation_evidence_policy NOT IN ('stop', 'continue')
+        LIMIT 1
+        """
+    ).fetchone()
+    if not has_invalid:
+        return
+
+    conn.execute(
+        """
+        UPDATE runs
+        SET annotation_evidence_policy = ?
+        WHERE annotation_evidence_policy IS NULL
+           OR annotation_evidence_policy NOT IN ('stop', 'continue')
+        """,
+        (fallback_policy,),
+    )

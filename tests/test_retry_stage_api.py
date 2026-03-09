@@ -181,6 +181,49 @@ class RetryStageApiTestCase(unittest.TestCase):
             self.assertEqual(payload["error"]["details"]["stage_name"], "classification")
             self.assertEqual(payload["error"]["details"]["current_status"], "queued")
 
+    def test_retry_returns_updated_annotation_evidence_policy_after_settings_change(self):
+        vcf_bytes = b"#CHROM\tPOS\tREF\tALT\n1\t1\tA\tT\n"
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = os.path.join(tmpdir, "sp.db")
+            client = self._create_client(db_path)
+
+            run_id = self._create_run(client)
+            self.assertEqual(self._upload(client, run_id, vcf_bytes).status_code, 200)
+            self.assertEqual(client.post(f"/api/v1/runs/{run_id}/start").status_code, 200)
+            self.assertEqual(self._wait_for_run_not_running(client, run_id), "queued")
+
+            vcf_payload = json.loads(client.get(f"/api/v1/runs/{run_id}/vcf").get_data(as_text=True))
+            uploaded_at = vcf_payload["data"]["uploaded_at"]
+
+            from storage.stages import mark_stage_failed  # noqa: E402
+
+            mark_stage_failed(
+                db_path,
+                run_id,
+                "annotation",
+                input_uploaded_at=uploaded_at,
+                error_code="ANNOTATION_FAILED",
+                error_message="boom",
+            )
+
+            settings_resp = client.post(
+                f"/api/v1/runs/{run_id}/settings",
+                data=json.dumps({"annotation_evidence_policy": "stop"}),
+                content_type="application/json",
+            )
+            self.assertEqual(settings_resp.status_code, 200)
+            settings_payload = json.loads(settings_resp.get_data(as_text=True))
+            self.assertTrue(settings_payload["ok"])
+            self.assertEqual(settings_payload["data"]["annotation_evidence_policy"], "stop")
+
+            retry_resp = client.post(f"/api/v1/runs/{run_id}/stages/annotation/retry")
+            self.assertEqual(retry_resp.status_code, 200)
+            retry_payload = json.loads(retry_resp.get_data(as_text=True))
+            self.assertTrue(retry_payload["ok"])
+            self.assertEqual(retry_payload["data"]["annotation_evidence_policy"], "stop")
+            self.assertEqual(self._wait_for_run_not_running(client, run_id), "queued")
+
 
 if __name__ == "__main__":
     unittest.main()

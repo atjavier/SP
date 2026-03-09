@@ -2,6 +2,9 @@
   const startBtn = document.getElementById("start-btn");
   const newRunBtn = document.getElementById("new-run-btn");
   const fileInput = document.getElementById("vcf-file");
+  const evidencePolicyInputs = Array.from(
+    document.querySelectorAll("input[name='annotation-evidence-policy']"),
+  );
   const messageEl = document.getElementById("upload-validation-message");
   const resultsEl = document.getElementById("upload-validation-results");
 
@@ -66,6 +69,7 @@
           status: run.status ?? null,
           created_at: run.created_at ?? null,
           reference_build: run.reference_build ?? null,
+          annotation_evidence_policy: run.annotation_evidence_policy ?? null,
         }),
       );
     } catch {
@@ -112,6 +116,27 @@
     startBtn.disabled = !enabled || inFlight;
   }
 
+  function selectedEvidencePolicy() {
+    for (const input of evidencePolicyInputs) {
+      if (input?.checked) return input.value;
+    }
+    return "continue";
+  }
+
+  function applyEvidencePolicySelection(policy) {
+    const normalized = String(policy || "").trim().toLowerCase();
+    const next = normalized === "stop" ? "stop" : "continue";
+    for (const input of evidencePolicyInputs) {
+      input.checked = input.value === next;
+    }
+  }
+
+  function setEvidencePolicyDisabled(disabled) {
+    for (const input of evidencePolicyInputs) {
+      input.disabled = Boolean(disabled) || inFlight;
+    }
+  }
+
   async function postMultipart(url, formData) {
     const resp = await fetch(url, {
       method: "POST",
@@ -128,10 +153,14 @@
     return { resp, payload };
   }
 
-  async function postJson(url) {
+  async function postJson(url, body = null) {
+    const hasBody = body != null;
     const resp = await fetch(url, {
       method: "POST",
-      headers: { Accept: "application/json" },
+      headers: hasBody
+        ? { Accept: "application/json", "Content-Type": "application/json" }
+        : { Accept: "application/json" },
+      body: hasBody ? JSON.stringify(body) : undefined,
     });
     const text = await resp.text();
     let payload = null;
@@ -148,9 +177,14 @@
     const run = detail?.run ?? detail ?? null;
     const status = run?.status ?? null;
     setStartEnabled(status !== "running");
+    setEvidencePolicyDisabled(status === "running");
+    if (run?.annotation_evidence_policy) {
+      applyEvidencePolicySelection(run.annotation_evidence_policy);
+    }
   });
 
   setStartEnabled(loadStoredRun()?.status !== "running");
+  setEvidencePolicyDisabled(loadStoredRun()?.status === "running");
 
   function resetForNewInput() {
     const stored = loadStoredRun();
@@ -191,7 +225,10 @@
 
       dispatchTaskQueueReset();
       setMessage("info", "Creating run...");
-      const { resp: runResp, payload: runPayload } = await postJson("/api/v1/runs");
+      const requestedPolicy = selectedEvidencePolicy();
+      const { resp: runResp, payload: runPayload } = await postJson("/api/v1/runs", {
+        annotation_evidence_policy: requestedPolicy,
+      });
       if (!runResp.ok || !runPayload?.ok) {
         const msg = runPayload?.error?.message ?? "Failed to create run.";
         setMessage("error", msg);
@@ -204,6 +241,9 @@
         return;
       }
       storeRun(runPayload.data);
+      applyEvidencePolicySelection(
+        runPayload?.data?.annotation_evidence_policy || requestedPolicy,
+      );
 
       const formData = new FormData();
       formData.append("vcf_file", file);
@@ -270,6 +310,7 @@
     } finally {
       inFlight = false;
       setStartEnabled(loadStoredRun()?.status !== "running");
+      setEvidencePolicyDisabled(loadStoredRun()?.status === "running");
     }
   });
 

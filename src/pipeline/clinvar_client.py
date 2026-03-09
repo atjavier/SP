@@ -292,14 +292,20 @@ def fetch_clinvar_evidence_for_variant(
                 continue
             break
         except Exception as exc:  # noqa: BLE001
+            retryable = isinstance(exc, (OSError, ConnectionError))
+            reason_code = "NETWORK_ERROR" if retryable else "REQUEST_ERROR"
             last_error = {
-                "reason_code": "REQUEST_ERROR",
+                "reason_code": reason_code,
                 "reason_message": f"ClinVar request failed unexpectedly: {exc}",
                 "details": {
                     "search_url": search_url,
                     "summary_url": summary_url,
+                    "error": str(exc),
                 },
             }
+            if retryable and attempt < attempts:
+                time.sleep(_backoff_seconds(config, attempt))
+                continue
             break
 
     if last_error is None:

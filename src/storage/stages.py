@@ -281,9 +281,11 @@ def reset_stage_and_downstream(
             if "annotation" in stages_to_reset:
                 from storage.clinvar_evidence import clear_clinvar_evidence_for_run
                 from storage.dbsnp_evidence import clear_dbsnp_evidence_for_run
+                from storage.gnomad_evidence import clear_gnomad_evidence_for_run
 
                 clear_dbsnp_evidence_for_run(db_path, run_id, conn=active, commit=False)
                 clear_clinvar_evidence_for_run(db_path, run_id, conn=active, commit=False)
+                clear_gnomad_evidence_for_run(db_path, run_id, conn=active, commit=False)
 
             if commit and began_transaction:
                 active.commit()

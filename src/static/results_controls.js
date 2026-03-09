@@ -309,6 +309,13 @@
     return fallback;
   }
 
+  function formatEvidencePolicy(policy) {
+    const normalized = String(policy || "").trim().toLowerCase();
+    if (normalized === "stop") return "stop (fail annotation stage)";
+    if (normalized === "continue") return "continue (allow partial evidence)";
+    return "";
+  }
+
   function stageByName(stages, stageName) {
     if (!Array.isArray(stages)) return null;
     for (const stage of stages) {
@@ -622,8 +629,24 @@
     const failed = stageFailureText(stage, "Annotation failed.");
     if (failed) {
       setMessage(annotationMessageEl, failed);
-      setSummaryRows(annotationSummaryEl, []);
-      setMessage(annotationDiagnosticsMessageEl, "");
+      const details = stage?.error?.details && typeof stage.error.details === "object"
+        ? stage.error.details
+        : {};
+      const missingOutputs = Array.isArray(details?.missing_outputs)
+        ? details.missing_outputs.filter((value) => typeof value === "string" && value.trim())
+        : [];
+      const policyText = formatEvidencePolicy(
+        details?.annotation_evidence_policy || stage?.stats?.annotation_evidence_policy || "",
+      );
+      setSummaryRows(annotationSummaryEl, [
+        { label: "Evidence policy", value: policyText || "" },
+        { label: "Failed source", value: details?.failed_source || "" },
+        { label: "Missing outputs", value: missingOutputs.join(", ") },
+      ]);
+      setMessage(
+        annotationDiagnosticsMessageEl,
+        details?.hint || "Evidence retrieval failed. Retry with a different policy or fix source connectivity.",
+      );
       hideAnnotationDiagnosticsTable();
       setMessage(annotationVcfMessageEl, "");
       hideAnnotationVcfTable();
@@ -648,6 +671,10 @@
       const found = Number(stats?.[`${prefix}_found`] ?? 0);
       const notFound = Number(stats?.[`${prefix}_not_found`] ?? 0);
       const errors = Number(stats?.[`${prefix}_errors`] ?? 0);
+      const skipped = Number(stats?.[`${prefix}_skipped_out_of_scope`] ?? 0);
+      if (Number.isFinite(skipped) && skipped > 0) {
+        return `${found} found / ${notFound} not found / ${errors} errors / ${skipped} skipped`;
+      }
       return `${found} found / ${notFound} not found / ${errors} errors`;
     };
     const warnings = [];
@@ -658,6 +685,7 @@
     setSummaryRows(annotationSummaryEl, [
       { label: "Tool", value: stats?.tool },
       { label: "Genome", value: stats?.genome },
+      { label: "Evidence policy", value: formatEvidencePolicy(stats?.annotation_evidence_policy) },
       { label: "Configured", value: stats?.configured },
       { label: "Variants written", value: stats?.variants_written },
       { label: "Output VCF", value: basename(stats?.output_vcf_path) || stats?.output_vcf_path },
