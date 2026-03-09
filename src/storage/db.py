@@ -56,6 +56,227 @@ SCHEMA_STATEMENTS: tuple[str, ...] = (
     );
     """,
     "CREATE INDEX IF NOT EXISTS idx_run_variants_run_id ON run_variants(run_id);",
+    """
+    CREATE TABLE IF NOT EXISTS run_pre_annotations (
+      run_id TEXT NOT NULL,
+      variant_id TEXT NOT NULL,
+      variant_key TEXT NOT NULL,
+      base_change TEXT NOT NULL,
+      substitution_class TEXT NOT NULL,
+      ref_class TEXT NOT NULL,
+      alt_class TEXT NOT NULL,
+      details_json TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      PRIMARY KEY (run_id, variant_id),
+      FOREIGN KEY (run_id) REFERENCES runs(run_id),
+      FOREIGN KEY (variant_id) REFERENCES run_variants(variant_id) ON DELETE CASCADE
+    );
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_run_pre_annotations_run_id ON run_pre_annotations(run_id);",
+    """
+    CREATE TRIGGER IF NOT EXISTS trg_run_pre_annotations_run_match_insert
+    BEFORE INSERT ON run_pre_annotations
+    FOR EACH ROW
+    BEGIN
+      SELECT
+        CASE
+          WHEN (SELECT run_id FROM run_variants WHERE variant_id = NEW.variant_id) != NEW.run_id
+          THEN RAISE(ABORT, 'RUN_VARIANT_MISMATCH')
+        END;
+    END;
+    """,
+    """
+    CREATE TRIGGER IF NOT EXISTS trg_run_pre_annotations_run_match_update
+    BEFORE UPDATE OF run_id, variant_id ON run_pre_annotations
+    FOR EACH ROW
+    BEGIN
+      SELECT
+        CASE
+          WHEN (SELECT run_id FROM run_variants WHERE variant_id = NEW.variant_id) != NEW.run_id
+          THEN RAISE(ABORT, 'RUN_VARIANT_MISMATCH')
+        END;
+    END;
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS run_classifications (
+      run_id TEXT NOT NULL,
+      variant_id TEXT NOT NULL,
+      consequence_category TEXT NOT NULL,
+      reason_code TEXT,
+      reason_message TEXT,
+      details_json TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      PRIMARY KEY (run_id, variant_id),
+      FOREIGN KEY (run_id) REFERENCES runs(run_id),
+      FOREIGN KEY (variant_id) REFERENCES run_variants(variant_id) ON DELETE CASCADE
+    );
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_run_classifications_run_id ON run_classifications(run_id);",
+    """
+    CREATE TRIGGER IF NOT EXISTS trg_run_classifications_run_match_insert
+    BEFORE INSERT ON run_classifications
+    FOR EACH ROW
+    BEGIN
+      SELECT
+        CASE
+          WHEN (SELECT run_id FROM run_variants WHERE variant_id = NEW.variant_id) != NEW.run_id
+          THEN RAISE(ABORT, 'RUN_VARIANT_MISMATCH')
+        END;
+    END;
+    """,
+    """
+    CREATE TRIGGER IF NOT EXISTS trg_run_classifications_run_match_update
+    BEFORE UPDATE OF run_id, variant_id ON run_classifications
+    FOR EACH ROW
+    BEGIN
+      SELECT
+        CASE
+          WHEN (SELECT run_id FROM run_variants WHERE variant_id = NEW.variant_id) != NEW.run_id
+          THEN RAISE(ABORT, 'RUN_VARIANT_MISMATCH')
+        END;
+    END;
+    """,
+    """
+    CREATE TRIGGER IF NOT EXISTS trg_run_classifications_validate_insert
+    BEFORE INSERT ON run_classifications
+    FOR EACH ROW
+    BEGIN
+      SELECT
+        CASE
+          WHEN NEW.consequence_category NOT IN ('unclassified', 'synonymous', 'missense', 'nonsense', 'other')
+          THEN RAISE(ABORT, 'INVALID_CONSEQUENCE_CATEGORY')
+        END;
+      SELECT
+        CASE
+          WHEN NEW.consequence_category = 'unclassified' AND NEW.reason_code IS NULL
+          THEN RAISE(ABORT, 'MISSING_REASON_CODE')
+        END;
+    END;
+    """,
+    """
+    CREATE TRIGGER IF NOT EXISTS trg_run_classifications_validate_update
+    BEFORE UPDATE OF consequence_category, reason_code ON run_classifications
+    FOR EACH ROW
+    BEGIN
+      SELECT
+        CASE
+          WHEN NEW.consequence_category NOT IN ('unclassified', 'synonymous', 'missense', 'nonsense', 'other')
+          THEN RAISE(ABORT, 'INVALID_CONSEQUENCE_CATEGORY')
+        END;
+      SELECT
+        CASE
+          WHEN NEW.consequence_category = 'unclassified' AND NEW.reason_code IS NULL
+          THEN RAISE(ABORT, 'MISSING_REASON_CODE')
+        END;
+    END;
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS run_predictor_outputs (
+      run_id TEXT NOT NULL,
+      variant_id TEXT NOT NULL,
+      predictor_key TEXT NOT NULL,
+      outcome TEXT NOT NULL,
+      score REAL,
+      label TEXT,
+      reason_code TEXT,
+      reason_message TEXT,
+      details_json TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      PRIMARY KEY (run_id, variant_id, predictor_key),
+      FOREIGN KEY (run_id) REFERENCES runs(run_id),
+      FOREIGN KEY (variant_id) REFERENCES run_variants(variant_id) ON DELETE CASCADE
+    );
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_run_predictor_outputs_run_id ON run_predictor_outputs(run_id);",
+    "CREATE INDEX IF NOT EXISTS idx_run_predictor_outputs_predictor_key ON run_predictor_outputs(predictor_key);",
+    """
+    CREATE TRIGGER IF NOT EXISTS trg_run_predictor_outputs_run_match_insert
+    BEFORE INSERT ON run_predictor_outputs
+    FOR EACH ROW
+    BEGIN
+      SELECT
+        CASE
+          WHEN (SELECT run_id FROM run_variants WHERE variant_id = NEW.variant_id) != NEW.run_id
+          THEN RAISE(ABORT, 'RUN_VARIANT_MISMATCH')
+        END;
+    END;
+    """,
+    """
+    CREATE TRIGGER IF NOT EXISTS trg_run_predictor_outputs_run_match_update
+    BEFORE UPDATE OF run_id, variant_id ON run_predictor_outputs
+    FOR EACH ROW
+    BEGIN
+      SELECT
+        CASE
+          WHEN (SELECT run_id FROM run_variants WHERE variant_id = NEW.variant_id) != NEW.run_id
+          THEN RAISE(ABORT, 'RUN_VARIANT_MISMATCH')
+        END;
+    END;
+    """,
+    """
+    CREATE TRIGGER IF NOT EXISTS trg_run_predictor_outputs_validate_insert
+    BEFORE INSERT ON run_predictor_outputs
+    FOR EACH ROW
+    BEGIN
+      SELECT
+        CASE
+          WHEN NEW.outcome NOT IN ('computed', 'not_applicable', 'not_computed', 'error')
+          THEN RAISE(ABORT, 'INVALID_PREDICTOR_OUTCOME')
+        END;
+      SELECT
+        CASE
+          WHEN NEW.outcome = 'computed' AND NEW.score IS NULL
+          THEN RAISE(ABORT, 'MISSING_SCORE')
+        END;
+      SELECT
+        CASE
+          WHEN NEW.outcome != 'computed' AND NEW.score IS NOT NULL
+          THEN RAISE(ABORT, 'SCORE_MUST_BE_NULL')
+        END;
+      SELECT
+        CASE
+          WHEN NEW.outcome != 'computed' AND NEW.label IS NOT NULL
+          THEN RAISE(ABORT, 'LABEL_MUST_BE_NULL')
+        END;
+      SELECT
+        CASE
+          WHEN NEW.outcome != 'computed' AND NEW.reason_code IS NULL
+          THEN RAISE(ABORT, 'MISSING_REASON_CODE')
+        END;
+    END;
+    """,
+    """
+    CREATE TRIGGER IF NOT EXISTS trg_run_predictor_outputs_validate_update
+    BEFORE UPDATE OF outcome, score, label, reason_code ON run_predictor_outputs
+    FOR EACH ROW
+    BEGIN
+      SELECT
+        CASE
+          WHEN NEW.outcome NOT IN ('computed', 'not_applicable', 'not_computed', 'error')
+          THEN RAISE(ABORT, 'INVALID_PREDICTOR_OUTCOME')
+        END;
+      SELECT
+        CASE
+          WHEN NEW.outcome = 'computed' AND NEW.score IS NULL
+          THEN RAISE(ABORT, 'MISSING_SCORE')
+        END;
+      SELECT
+        CASE
+          WHEN NEW.outcome != 'computed' AND NEW.score IS NOT NULL
+          THEN RAISE(ABORT, 'SCORE_MUST_BE_NULL')
+        END;
+      SELECT
+        CASE
+          WHEN NEW.outcome != 'computed' AND NEW.label IS NOT NULL
+          THEN RAISE(ABORT, 'LABEL_MUST_BE_NULL')
+        END;
+      SELECT
+        CASE
+          WHEN NEW.outcome != 'computed' AND NEW.reason_code IS NULL
+          THEN RAISE(ABORT, 'MISSING_REASON_CODE')
+        END;
+    END;
+    """,
 )
 
 
@@ -100,6 +321,11 @@ def _normalize_stage_status_vocabulary(conn: sqlite3.Connection) -> None:
     # Legacy databases may contain stage statuses that are no longer part of the
     # accepted vocabulary (Story 3.2). Normalize them in-place so APIs never
     # surface unexpected status values.
+    has_legacy = conn.execute(
+        "SELECT 1 FROM run_stages WHERE status = 'blocked' LIMIT 1;"
+    ).fetchone()
+    if not has_legacy:
+        return
     conn.execute("UPDATE run_stages SET status = 'failed' WHERE status = 'blocked';")
 
 
@@ -107,6 +333,4 @@ def _ensure_runs_reference_build_column(conn: sqlite3.Connection) -> None:
     columns = {row[1] for row in conn.execute("PRAGMA table_info(runs);").fetchall()}
     if "reference_build" in columns:
         return
-    conn.execute(
-        "ALTER TABLE runs ADD COLUMN reference_build TEXT NOT NULL DEFAULT 'GRCh38';"
-    )
+    conn.execute("ALTER TABLE runs ADD COLUMN reference_build TEXT NOT NULL DEFAULT 'GRCh38';")

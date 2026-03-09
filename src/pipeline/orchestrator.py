@@ -1,8 +1,20 @@
 from storage.run_inputs import get_run_input, get_run_upload_path
 from storage.runs import get_run
-from storage.stages import PIPELINE_STAGE_ORDER, get_stage, list_pipeline_stages, mark_stage_failed, mark_stage_running, mark_stage_succeeded
+from storage.stages import (
+    PIPELINE_STAGE_ORDER,
+    get_stage,
+    list_pipeline_stages,
+    mark_stage_canceled,
+    mark_stage_failed,
+    mark_stage_running,
+    mark_stage_succeeded,
+)
 
 from pipeline.parser_stage import StageExecutionError, run_parser_stage
+from pipeline.pre_annotation_stage import run_pre_annotation_stage
+from pipeline.classification_stage import run_classification_stage
+from pipeline.prediction_stage import run_prediction_stage
+from pipeline.annotation_stage import run_annotation_stage
 
 
 class OrchestratorError(Exception):
@@ -65,7 +77,14 @@ def determine_start_stage(db_path: str, run_id: str, *, uploaded_at: str) -> str
     return None
 
 
-def run_pipeline(db_path: str, run_id: str, *, max_decompressed_bytes: int, logger) -> dict:
+def run_pipeline(
+    db_path: str,
+    run_id: str,
+    *,
+    max_decompressed_bytes: int,
+    logger,
+    prediction_config: dict | None = None,
+) -> dict:
     prepared = prepare_pipeline_start(db_path, run_id)
     uploaded_at = prepared["uploaded_at"]
     upload_path = get_run_upload_path(db_path, run_id)
@@ -101,18 +120,124 @@ def run_pipeline(db_path: str, run_id: str, *, max_decompressed_bytes: int, logg
                 if exc.code == "ALREADY_PARSED":
                     continue
                 raise OrchestratorError(exc.http_status, exc.code, exc.message, details=exc.details) from None
+
+            latest_after = get_run(db_path, run_id)
+            if latest_after and latest_after.get("status") == "canceled":
+                raise OrchestratorError(409, "RUN_CANCELED", "Run was canceled.")
+
+            executed.append(stage_name)
+            continue
+
+        if stage_name == "pre_annotation":
+            try:
+                run_pre_annotation_stage(
+                    db_path,
+                    run_id,
+                    uploaded_at=uploaded_at,
+                    logger=logger,
+                    force=False,
+                )
+            except StageExecutionError as exc:
+                if exc.code == "ALREADY_PRE_ANNOTATED":
+                    continue
+                raise OrchestratorError(exc.http_status, exc.code, exc.message, details=exc.details) from None
+
+            latest_after = get_run(db_path, run_id)
+            if latest_after and latest_after.get("status") == "canceled":
+                raise OrchestratorError(409, "RUN_CANCELED", "Run was canceled.")
+
+            executed.append(stage_name)
+            continue
+
+        if stage_name == "classification":
+            try:
+                run_classification_stage(
+                    db_path,
+                    run_id,
+                    uploaded_at=uploaded_at,
+                    logger=logger,
+                    force=False,
+                    vep_config_overrides=prediction_config,
+                )
+            except StageExecutionError as exc:
+                if exc.code == "ALREADY_CLASSIFIED":
+                    continue
+                raise OrchestratorError(exc.http_status, exc.code, exc.message, details=exc.details) from None
+
+            latest_after = get_run(db_path, run_id)
+            if latest_after and latest_after.get("status") == "canceled":
+                raise OrchestratorError(409, "RUN_CANCELED", "Run was canceled.")
+
+            executed.append(stage_name)
+            continue
+
+        if stage_name == "prediction":
+            try:
+                run_prediction_stage(
+                    db_path,
+                    run_id,
+                    uploaded_at=uploaded_at,
+                    logger=logger,
+                    force=False,
+                    vep_config_overrides=prediction_config,
+                )
+            except StageExecutionError as exc:
+                if exc.code == "ALREADY_PREDICTED":
+                    continue
+                raise OrchestratorError(exc.http_status, exc.code, exc.message, details=exc.details) from None
+
+            latest_after = get_run(db_path, run_id)
+            if latest_after and latest_after.get("status") == "canceled":
+                raise OrchestratorError(409, "RUN_CANCELED", "Run was canceled.")
+
+            executed.append(stage_name)
+            continue
+
+        if stage_name == "annotation":
+            try:
+                run_annotation_stage(
+                    db_path,
+                    run_id,
+                    uploaded_at=uploaded_at,
+                    logger=logger,
+                    force=False,
+                )
+            except StageExecutionError as exc:
+                if exc.code == "ALREADY_ANNOTATED":
+                    continue
+                raise OrchestratorError(exc.http_status, exc.code, exc.message, details=exc.details) from None
+
+            latest_after = get_run(db_path, run_id)
+            if latest_after and latest_after.get("status") == "canceled":
+                raise OrchestratorError(409, "RUN_CANCELED", "Run was canceled.")
+
             executed.append(stage_name)
             continue
 
         try:
             mark_stage_running(db_path, run_id, stage_name, input_uploaded_at=uploaded_at)
+
+            latest_after_start = get_run(db_path, run_id)
+            if latest_after_start and latest_after_start.get("status") == "canceled":
+                mark_stage_canceled(db_path, run_id, stage_name, input_uploaded_at=uploaded_at)
+                raise OrchestratorError(409, "RUN_CANCELED", "Run was canceled.")
+
             mark_stage_succeeded(
                 db_path,
                 run_id,
                 stage_name,
                 input_uploaded_at=uploaded_at,
-                stats={"stub": True},
+                stats={"status": "completed"},
             )
+            stage_after = get_stage(db_path, run_id, stage_name)
+            if stage_after and stage_after.get("status") == "canceled":
+                raise OrchestratorError(409, "RUN_CANCELED", "Run was canceled.")
+            latest_after_complete = get_run(db_path, run_id)
+            if latest_after_complete and latest_after_complete.get("status") == "canceled":
+                raise OrchestratorError(409, "RUN_CANCELED", "Run was canceled.")
+
+        except OrchestratorError:
+            raise
         except Exception as exc:
             logger.exception("Stage execution failed: %s", stage_name)
             mark_stage_failed(

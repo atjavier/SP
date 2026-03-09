@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 
 from storage.db import init_schema, open_connection
 from storage.runs import get_run
+from storage.stages import reset_stage_and_downstream
 from vcf_validation import validate_vcf_path
 
 
@@ -83,6 +84,14 @@ def store_run_vcf(db_path: str, run_id: str, *, file_storage) -> dict:
                 json.dumps(validation.get("errors", [])),
                 json.dumps(validation.get("warnings", [])),
             ),
+        )
+        # A newly uploaded input invalidates previous stage outputs for this run.
+        reset_stage_and_downstream(
+            db_path,
+            run_id,
+            "parser",
+            conn=conn,
+            commit=False,
         )
         conn.commit()
 

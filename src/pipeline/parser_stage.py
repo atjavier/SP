@@ -78,12 +78,12 @@ def run_parser_stage(
         conn = _connect_db(db_path)
         try:
             _init_schema(conn)
-            conn.execute("BEGIN")
-
+            conn.execute("BEGIN IMMEDIATE")
             mark_stage_running(
                 db_path, run_id, "parser", input_uploaded_at=uploaded_at, conn=conn, commit=False
             )
             clear_variants_for_run(db_path, run_id, conn=conn, commit=False)
+            conn.commit()
 
             for record in iter_vcf_snv_records(
                 upload_path,
@@ -103,11 +103,24 @@ def run_parser_stage(
                         record.get("source_line"),
                         created_at,
                     )
-                )
+                    )
 
                 if len(rows) >= 500:
+                    latest = get_run(db_path, run_id)
+                    if latest and latest.get("status") == "canceled":
+                        conn.execute("BEGIN IMMEDIATE")
+                        mark_stage_canceled(
+                            db_path, run_id, "parser", input_uploaded_at=uploaded_at, conn=conn, commit=False
+                        )
+                        conn.commit()
+                        cleanup = delete_run_upload_checked(db_path, run_id)
+                        if not cleanup.get("ok"):
+                            logger.warning("Failed to delete uploaded VCF after cancellation: %s", cleanup)
+                        raise StageExecutionError(409, "RUN_CANCELED", "Run was canceled.")
+
                     attempted += len(rows)
                     before = conn.total_changes
+                    conn.execute("BEGIN IMMEDIATE")
                     conn.executemany(
                         """
                         INSERT OR IGNORE INTO run_variants (
@@ -118,11 +131,25 @@ def run_parser_stage(
                         rows,
                     )
                     inserted += conn.total_changes - before
+                    conn.commit()
                     rows.clear()
 
             if rows:
+                latest = get_run(db_path, run_id)
+                if latest and latest.get("status") == "canceled":
+                    conn.execute("BEGIN IMMEDIATE")
+                    mark_stage_canceled(
+                        db_path, run_id, "parser", input_uploaded_at=uploaded_at, conn=conn, commit=False
+                    )
+                    conn.commit()
+                    cleanup = delete_run_upload_checked(db_path, run_id)
+                    if not cleanup.get("ok"):
+                        logger.warning("Failed to delete uploaded VCF after cancellation: %s", cleanup)
+                    raise StageExecutionError(409, "RUN_CANCELED", "Run was canceled.")
+
                 attempted += len(rows)
                 before = conn.total_changes
+                conn.execute("BEGIN IMMEDIATE")
                 conn.executemany(
                     """
                     INSERT OR IGNORE INTO run_variants (
@@ -133,10 +160,24 @@ def run_parser_stage(
                     rows,
                 )
                 inserted += conn.total_changes - before
+                conn.commit()
 
             stats["snv_records_persisted"] = inserted
             stats["duplicate_records_ignored"] = max(0, attempted - inserted)
 
+            latest = get_run(db_path, run_id)
+            if latest and latest.get("status") == "canceled":
+                conn.execute("BEGIN IMMEDIATE")
+                mark_stage_canceled(
+                    db_path, run_id, "parser", input_uploaded_at=uploaded_at, conn=conn, commit=False
+                )
+                conn.commit()
+                cleanup = delete_run_upload_checked(db_path, run_id)
+                if not cleanup.get("ok"):
+                    logger.warning("Failed to delete uploaded VCF after cancellation: %s", cleanup)
+                raise StageExecutionError(409, "RUN_CANCELED", "Run was canceled.")
+
+            conn.execute("BEGIN IMMEDIATE")
             mark_stage_succeeded(
                 db_path,
                 run_id,
@@ -183,6 +224,8 @@ def run_parser_stage(
                 **(exc.details or {}),
             },
         ) from None
+    except StageExecutionError:
+        raise
     except Exception as exc:
         logger.exception("Unexpected parse failure")
         try:

@@ -8,3 +8,51 @@ body {
   outline-offset: 2px;
 }
 
+.nav-tabs .nav-link {
+  color: #495057;
+}
+
+.nav-tabs .nav-link.active {
+  font-weight: 600;
+}
+
+table.table thead th {
+  font-weight: 600;
+}
+
+.btn-link {
+  text-decoration: none;
+}
+
+.btn-link:hover {
+  text-decoration: underline;
+}
+
+.results-scroll-box {
+  max-height: 24rem;
+  overflow: auto;
+  border: 1px solid #e9ecef;
+  border-radius: 0.5rem;
+  background: #fff;
+}
+
+.results-scroll-box .table {
+  margin-bottom: 0;
+}
+
+.results-scroll-box thead th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+}
+
+.results-scroll-summary {
+  padding: 0.5rem 0.75rem;
+}
+
+#annotation-vcf-table td,
+#annotation-vcf-table th {
+  white-space: nowrap;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+  font-size: 0.75rem;
+}

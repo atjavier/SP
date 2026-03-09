@@ -1,10 +1,17 @@
 .venv/
 __pycache__/
 *.py[cod]
+*.pyo
+.pytest_cache/
+.mypy_cache/
+.coverage
+coverage.xml
+htmlcov/
 
 # Local environment / secrets
 .env
 .env.*
+!.env.example
 
 # Editor / OS
 .vscode/
@@ -13,6 +20,11 @@ Thumbs.db
 
 # App runtime artifacts (future stories)
 instance/
+*.log
+
+# Local tool/download artifacts
+snpEff_latest_core.zip
+homo_sapiens_vep_*.tar.gz
 
 
 #BMAD files

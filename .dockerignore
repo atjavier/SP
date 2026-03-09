@@ -1,0 +1,16 @@
+.git
+.venv
+.agents
+.miktex
+.venv-wsl
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+instance/
+_bmad/
+_bmad-output/
+tests/
+docs/
+snpEff_latest_core.zip

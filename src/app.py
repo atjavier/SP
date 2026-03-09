@@ -1,5 +1,6 @@
 import os
 import secrets
+import sys
 import threading
 import time
 from typing import Any
@@ -9,13 +10,22 @@ from werkzeug.exceptions import RequestEntityTooLarge
 
 
 def create_app(config_overrides: dict[str, Any] | None = None) -> Flask:
+    project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+    if not (config_overrides and config_overrides.get("TESTING")):
+        try:
+            from env_file import load_env_file
+
+            load_env_file(os.path.join(project_root, ".env"), override=False)
+        except Exception:
+            # never fail app startup because of local env file parsing
+            pass
+
     app = Flask(__name__)
     secret_key = os.environ.get("SECRET_KEY")
     if not secret_key:
         secret_key = secrets.token_hex(32)
     app.config["SECRET_KEY"] = secret_key
 
-    project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
     default_db_path = os.path.join(project_root, "instance", "sp.db")
     app.config["SP_DB_PATH"] = os.environ.get("SP_DB_PATH", default_db_path)
 
@@ -32,6 +42,32 @@ def create_app(config_overrides: dict[str, Any] | None = None) -> Flask:
         app.config.update(config_overrides)
         if "SP_MAX_UPLOAD_BYTES" in app.config:
             app.config["MAX_CONTENT_LENGTH"] = app.config["SP_MAX_UPLOAD_BYTES"]
+
+    if app.config.get("TESTING"):
+        # Unit tests should not execute external tools like Java/SnpEff even if
+        # a developer has them configured in their shell environment.
+        os.environ["SP_SNPEFF_ENABLED"] = "0"
+        # Unit tests should also avoid depending on a locally installed VEP.
+        # Keep these settings on app config (not process-global env) and pass
+        # them explicitly to the prediction stage via the orchestrator.
+        test_tools_dir = os.path.join(os.path.dirname(app.config["SP_DB_PATH"]), ".test-tools")
+        os.makedirs(test_tools_dir, exist_ok=True)
+        vep_cache_dir = os.path.join(test_tools_dir, "vep-cache")
+        os.makedirs(vep_cache_dir, exist_ok=True)
+        alpha_file_path = os.path.join(test_tools_dir, "alphamissense.tsv")
+        if not os.path.isfile(alpha_file_path):
+            with open(alpha_file_path, "w", encoding="utf-8", newline="\n") as f:
+                f.write("# deterministic test fixture\n")
+        app.config["SP_TEST_PREDICTION_CONFIG"] = {
+            "cmd": sys.executable,
+            "script_path": os.path.join(project_root, "scripts", "mock_vep.py"),
+            "cache_dir": vep_cache_dir,
+            "alphamissense_file": alpha_file_path,
+            "timeout_seconds": 30,
+            "plugin_dir": None,
+            "fasta_path": None,
+            "extra_args": [],
+        }
 
     @app.errorhandler(RequestEntityTooLarge)
     def handle_request_entity_too_large(_exc):
@@ -168,6 +204,386 @@ def create_app(config_overrides: dict[str, Any] | None = None) -> Flask:
             )
 
         return jsonify({"ok": True, "data": {"run_id": run_id, "stages": stages}})
+
+    @app.get("/api/v1/runs/<run_id>/classifications")
+    def get_run_classifications(run_id: str):
+        from storage.classifications import list_classifications_for_run
+        from storage.runs import get_run as get_run_record
+        from storage.run_inputs import get_run_input
+        from storage.stages import get_stage
+
+        db_path = app.config["SP_DB_PATH"]
+        limit_raw = (request.args.get("limit") or "").strip()
+        limit = 100
+        if limit_raw:
+            try:
+                limit = int(limit_raw)
+            except ValueError:
+                limit = 100
+        limit = max(1, min(limit, 1000))
+
+        try:
+            run = get_run_record(db_path, run_id)
+        except Exception:
+            app.logger.exception("Failed to fetch run record for classification listing")
+            return (
+                jsonify(
+                    {
+                        "ok": False,
+                        "error": {"code": "RUN_FETCH_FAILED", "message": "Failed to fetch run record."},
+                    }
+                ),
+                500,
+            )
+
+        if not run:
+            return (
+                jsonify({"ok": False, "error": {"code": "RUN_NOT_FOUND", "message": "Run not found."}}),
+                404,
+            )
+
+        run_input = get_run_input(db_path, run_id)
+        latest_uploaded_at = run_input.get("uploaded_at") if run_input else None
+        stage = get_stage(db_path, run_id, "classification") or {}
+
+        stage_same_input = (
+            bool(latest_uploaded_at)
+            and stage.get("status") == "succeeded"
+            and stage.get("input_uploaded_at") == latest_uploaded_at
+        )
+        if not stage_same_input:
+            return jsonify(
+                {
+                    "ok": True,
+                    "data": {
+                        "run_id": run_id,
+                        "stage": stage or None,
+                        "classifications": [],
+                    },
+                }
+            )
+
+        try:
+            rows = list_classifications_for_run(db_path, run_id, limit=limit)
+        except Exception:
+            app.logger.exception("Failed to fetch classifications for run_id=%s", run_id)
+            return (
+                jsonify(
+                    {
+                        "ok": False,
+                        "error": {
+                            "code": "CLASSIFICATIONS_FETCH_FAILED",
+                            "message": "Failed to fetch classification results.",
+                        },
+                    }
+                ),
+                500,
+            )
+
+        return jsonify({"ok": True, "data": {"run_id": run_id, "stage": stage or None, "classifications": rows}})
+
+    @app.get("/api/v1/runs/<run_id>/predictor_outputs")
+    def get_run_predictor_outputs(run_id: str):
+        from storage.predictor_outputs import list_predictor_outputs_for_run
+        from storage.runs import get_run as get_run_record
+        from storage.run_inputs import get_run_input
+        from storage.stages import get_stage
+
+        db_path = app.config["SP_DB_PATH"]
+        limit_raw = (request.args.get("limit") or "").strip()
+        limit = 100
+        if limit_raw:
+            try:
+                limit = int(limit_raw)
+            except ValueError:
+                limit = 100
+        limit = max(1, min(limit, 1000))
+
+        predictor_key = (request.args.get("predictor_key") or "").strip() or None
+        variant_id = (request.args.get("variant_id") or "").strip() or None
+
+        try:
+            run = get_run_record(db_path, run_id)
+        except Exception:
+            app.logger.exception("Failed to fetch run record for predictor outputs listing")
+            return (
+                jsonify(
+                    {
+                        "ok": False,
+                        "error": {"code": "RUN_FETCH_FAILED", "message": "Failed to fetch run record."},
+                    }
+                ),
+                500,
+            )
+
+        if not run:
+            return (
+                jsonify({"ok": False, "error": {"code": "RUN_NOT_FOUND", "message": "Run not found."}}),
+                404,
+            )
+
+        run_input = get_run_input(db_path, run_id)
+        latest_uploaded_at = run_input.get("uploaded_at") if run_input else None
+        stage = get_stage(db_path, run_id, "prediction") or {}
+
+        stage_same_input = (
+            bool(latest_uploaded_at)
+            and stage.get("status") == "succeeded"
+            and stage.get("input_uploaded_at") == latest_uploaded_at
+        )
+        if not stage_same_input:
+            return jsonify(
+                {
+                    "ok": True,
+                    "data": {
+                        "run_id": run_id,
+                        "stage": stage or None,
+                        "predictor_outputs": [],
+                    },
+                }
+            )
+
+        try:
+            rows = list_predictor_outputs_for_run(
+                db_path,
+                run_id,
+                predictor_key=predictor_key,
+                variant_id=variant_id,
+                limit=limit,
+            )
+        except Exception:
+            app.logger.exception("Failed to fetch predictor outputs for run_id=%s", run_id)
+            return (
+                jsonify(
+                    {
+                        "ok": False,
+                        "error": {
+                            "code": "PREDICTOR_OUTPUTS_FETCH_FAILED",
+                            "message": "Failed to fetch predictor outputs.",
+                        },
+                    }
+                ),
+                500,
+            )
+
+        return jsonify({"ok": True, "data": {"run_id": run_id, "stage": stage or None, "predictor_outputs": rows}})
+
+    @app.get("/api/v1/runs/<run_id>/pre_annotations")
+    def get_run_pre_annotations(run_id: str):
+        from storage.pre_annotations import list_pre_annotations_for_run_public
+        from storage.runs import get_run as get_run_record
+        from storage.run_inputs import get_run_input
+        from storage.stages import get_stage
+
+        db_path = app.config["SP_DB_PATH"]
+        limit_raw = (request.args.get("limit") or "").strip()
+        limit = 100
+        if limit_raw:
+            try:
+                limit = int(limit_raw)
+            except ValueError:
+                limit = 100
+        limit = max(1, min(limit, 1000))
+        variant_id = (request.args.get("variant_id") or "").strip() or None
+
+        try:
+            run = get_run_record(db_path, run_id)
+        except Exception:
+            app.logger.exception("Failed to fetch run record for pre-annotation listing")
+            return (
+                jsonify(
+                    {
+                        "ok": False,
+                        "error": {"code": "RUN_FETCH_FAILED", "message": "Failed to fetch run record."},
+                    }
+                ),
+                500,
+            )
+
+        if not run:
+            return (
+                jsonify({"ok": False, "error": {"code": "RUN_NOT_FOUND", "message": "Run not found."}}),
+                404,
+            )
+
+        run_input = get_run_input(db_path, run_id)
+        latest_uploaded_at = run_input.get("uploaded_at") if run_input else None
+        stage = get_stage(db_path, run_id, "pre_annotation") or {}
+
+        stage_same_input = (
+            bool(latest_uploaded_at)
+            and stage.get("status") == "succeeded"
+            and stage.get("input_uploaded_at") == latest_uploaded_at
+        )
+        if not stage_same_input:
+            return jsonify(
+                {
+                    "ok": True,
+                    "data": {
+                        "run_id": run_id,
+                        "stage": stage or None,
+                        "pre_annotations": [],
+                    },
+                }
+            )
+
+        try:
+            rows = list_pre_annotations_for_run_public(
+                db_path,
+                run_id,
+                limit=limit,
+                variant_id=variant_id,
+            )
+        except Exception:
+            app.logger.exception("Failed to fetch pre-annotations for run_id=%s", run_id)
+            return (
+                jsonify(
+                    {
+                        "ok": False,
+                        "error": {
+                            "code": "PRE_ANNOTATIONS_FETCH_FAILED",
+                            "message": "Failed to fetch pre-annotation results.",
+                        },
+                    }
+                ),
+                500,
+            )
+
+        return jsonify({"ok": True, "data": {"run_id": run_id, "stage": stage or None, "pre_annotations": rows}})
+
+    @app.get("/api/v1/runs/<run_id>/annotation_output")
+    def get_run_annotation_output(run_id: str):
+        from storage.run_artifacts import run_artifacts_dir
+        from storage.run_inputs import get_run_input
+        from storage.runs import get_run as get_run_record
+        from storage.stages import get_stage
+
+        db_path = app.config["SP_DB_PATH"]
+        limit_raw = (request.args.get("limit") or "").strip()
+        limit = 300
+        if limit_raw:
+            try:
+                limit = int(limit_raw)
+            except ValueError:
+                limit = 300
+        limit = max(1, min(limit, 5000))
+
+        try:
+            run = get_run_record(db_path, run_id)
+        except Exception:
+            app.logger.exception("Failed to fetch run record for annotation output listing")
+            return (
+                jsonify(
+                    {
+                        "ok": False,
+                        "error": {"code": "RUN_FETCH_FAILED", "message": "Failed to fetch run record."},
+                    }
+                ),
+                500,
+            )
+
+        if not run:
+            return (
+                jsonify({"ok": False, "error": {"code": "RUN_NOT_FOUND", "message": "Run not found."}}),
+                404,
+            )
+
+        run_input = get_run_input(db_path, run_id)
+        latest_uploaded_at = run_input.get("uploaded_at") if run_input else None
+        stage = get_stage(db_path, run_id, "annotation") or {}
+
+        stage_same_input = (
+            bool(latest_uploaded_at)
+            and stage.get("status") == "succeeded"
+            and stage.get("input_uploaded_at") == latest_uploaded_at
+        )
+        if not stage_same_input:
+            return jsonify(
+                {
+                    "ok": True,
+                    "data": {
+                        "run_id": run_id,
+                        "stage": stage or None,
+                        "output_vcf_path": None,
+                        "preview_lines": [],
+                        "preview_line_count": 0,
+                        "truncated": False,
+                    },
+                }
+            )
+
+        stage_stats = stage.get("stats")
+        if not isinstance(stage_stats, dict):
+            stage_stats = {}
+
+        artifacts_dir = os.path.abspath(run_artifacts_dir(db_path, run_id))
+        default_path = os.path.abspath(os.path.join(artifacts_dir, "snpeff.annotated.vcf"))
+        output_vcf_path = stage_stats.get("output_vcf_path") or default_path
+        output_vcf_path = os.path.abspath(str(output_vcf_path))
+
+        try:
+            in_artifacts = os.path.commonpath([output_vcf_path, artifacts_dir]) == artifacts_dir
+        except ValueError:
+            in_artifacts = False
+        if not in_artifacts:
+            output_vcf_path = default_path
+
+        if not os.path.isfile(output_vcf_path):
+            return jsonify(
+                {
+                    "ok": True,
+                    "data": {
+                        "run_id": run_id,
+                        "stage": stage or None,
+                        "output_vcf_path": output_vcf_path,
+                        "preview_lines": [],
+                        "preview_line_count": 0,
+                        "truncated": False,
+                    },
+                }
+            )
+
+        preview_lines: list[str] = []
+        truncated = False
+        try:
+            with open(output_vcf_path, "r", encoding="utf-8", errors="replace") as f:
+                for idx, line in enumerate(f):
+                    if idx >= limit:
+                        truncated = True
+                        break
+                    preview_lines.append(line.rstrip("\r\n"))
+        except Exception:
+            app.logger.exception(
+                "Failed to read annotation output preview for run_id=%s path=%s",
+                run_id,
+                output_vcf_path,
+            )
+            return (
+                jsonify(
+                    {
+                        "ok": False,
+                        "error": {
+                            "code": "ANNOTATION_OUTPUT_READ_FAILED",
+                            "message": "Failed to read annotation output preview.",
+                        },
+                    }
+                ),
+                500,
+            )
+
+        return jsonify(
+            {
+                "ok": True,
+                "data": {
+                    "run_id": run_id,
+                    "stage": stage or None,
+                    "output_vcf_path": output_vcf_path,
+                    "preview_lines": preview_lines,
+                    "preview_line_count": len(preview_lines),
+                    "truncated": truncated,
+                },
+            }
+        )
 
     @app.get("/api/v1/runs/<run_id>/events")
     def stream_run_events(run_id: str):
@@ -380,6 +796,7 @@ def create_app(config_overrides: dict[str, Any] | None = None) -> Flask:
                     run_id,
                     max_decompressed_bytes=app.config["SP_MAX_VCF_DECOMPRESSED_BYTES"],
                     logger=app.logger,
+                    prediction_config=app.config.get("SP_TEST_PREDICTION_CONFIG"),
                 )
             except OrchestratorError as exc:
                 app.logger.warning(
@@ -657,6 +1074,7 @@ def create_app(config_overrides: dict[str, Any] | None = None) -> Flask:
                     run_id,
                     max_decompressed_bytes=app.config["SP_MAX_VCF_DECOMPRESSED_BYTES"],
                     logger=app.logger,
+                    prediction_config=app.config.get("SP_TEST_PREDICTION_CONFIG"),
                 )
             except OrchestratorError as exc:
                 app.logger.warning(
@@ -750,6 +1168,68 @@ def create_app(config_overrides: dict[str, Any] | None = None) -> Flask:
             RunInputRunNotFoundError,
             store_run_vcf,
         )
+        from storage.runs import get_run as get_run_record
+
+        db_path = app.config["SP_DB_PATH"]
+
+        try:
+            run = get_run_record(db_path, run_id)
+        except Exception:
+            app.logger.exception("Failed to fetch run record for VCF upload")
+            return (
+                jsonify(
+                    {
+                        "ok": False,
+                        "error": {
+                            "code": "RUN_FETCH_FAILED",
+                            "message": "Failed to fetch run record.",
+                        },
+                    }
+                ),
+                500,
+            )
+
+        if not run:
+            return (
+                jsonify(
+                    {
+                        "ok": False,
+                        "error": {
+                            "code": "RUN_NOT_FOUND",
+                            "message": "Run not found.",
+                        },
+                    }
+                ),
+                404,
+            )
+
+        if run.get("status") == "running":
+            return (
+                jsonify(
+                    {
+                        "ok": False,
+                        "error": {
+                            "code": "RUN_RUNNING",
+                            "message": "Run is currently running. Cancel it before uploading a new file.",
+                        },
+                    }
+                ),
+                409,
+            )
+
+        if run.get("status") == "canceled":
+            return (
+                jsonify(
+                    {
+                        "ok": False,
+                        "error": {
+                            "code": "RUN_CANCELED",
+                            "message": "Run is canceled. Create a new run to upload another file.",
+                        },
+                    }
+                ),
+                409,
+            )
 
         content_length = request.content_length
         max_bytes = app.config.get("SP_MAX_UPLOAD_BYTES")
@@ -801,7 +1281,7 @@ def create_app(config_overrides: dict[str, Any] | None = None) -> Flask:
 
         try:
             input_record = store_run_vcf(
-                app.config["SP_DB_PATH"],
+                db_path,
                 run_id,
                 file_storage=file_storage,
             )
@@ -991,5 +1471,13 @@ def create_app(config_overrides: dict[str, Any] | None = None) -> Flask:
 
 
 if __name__ == "__main__":
+    try:
+        from env_file import load_env_file
+
+        project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+        load_env_file(os.path.join(project_root, ".env"), override=False)
+    except Exception:
+        pass
+
     debug = os.environ.get("FLASK_DEBUG") == "1"
     create_app().run(debug=debug)

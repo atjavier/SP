@@ -106,6 +106,191 @@ class StageResetStorageTestCase(unittest.TestCase):
 
             self.assertEqual(len(list_variants_for_run(db_path, run_id, limit=10)), 0)
 
+    def test_reset_stage_and_downstream_clears_pre_annotations_when_resetting_pre_annotation(self):
+        from storage.db import init_schema, open_connection  # noqa: E402
+        from storage.pre_annotations import list_pre_annotations_for_run, upsert_pre_annotations_for_run  # noqa: E402
+        from storage.runs import create_run  # noqa: E402
+        from storage.stages import mark_stage_succeeded, reset_stage_and_downstream  # noqa: E402
+        from storage.variants import list_variants_for_run  # noqa: E402
+
+        uploaded_at = "2026-03-08T00:00:00+00:00"
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = os.path.join(tmpdir, "sp.db")
+            run_id = create_run(db_path)["run_id"]
+
+            mark_stage_succeeded(db_path, run_id, "parser", input_uploaded_at=uploaded_at, stats={"ok": True})
+            mark_stage_succeeded(
+                db_path, run_id, "pre_annotation", input_uploaded_at=uploaded_at, stats={"ok": True}
+            )
+
+            with open_connection(db_path) as conn:
+                init_schema(conn)
+                conn.execute(
+                    """
+                    INSERT INTO run_variants (
+                      variant_id, run_id, chrom, pos, ref, alt, source_line, created_at
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    ("v1", run_id, "1", 1, "A", "T", 1, uploaded_at),
+                )
+                conn.commit()
+
+            upsert_pre_annotations_for_run(
+                db_path,
+                run_id,
+                [
+                    {
+                        "variant_id": "v1",
+                        "variant_key": "1:1:A>T",
+                        "base_change": "A>T",
+                        "substitution_class": "transversion",
+                        "ref_class": "purine",
+                        "alt_class": "pyrimidine",
+                        "details": {"source_line": 1},
+                        "created_at": uploaded_at,
+                    }
+                ],
+            )
+
+            self.assertEqual(len(list_pre_annotations_for_run(db_path, run_id)), 1)
+            self.assertEqual(len(list_variants_for_run(db_path, run_id, limit=10)), 1)
+
+            reset_stage_and_downstream(db_path, run_id, "pre_annotation")
+
+            self.assertEqual(list_pre_annotations_for_run(db_path, run_id), [])
+            self.assertEqual(len(list_variants_for_run(db_path, run_id, limit=10)), 1)
+
+    def test_reset_stage_and_downstream_clears_classifications_when_resetting_classification(self):
+        from storage.classifications import (  # noqa: E402
+            list_classifications_for_run,
+            upsert_classifications_for_run,
+        )
+        from storage.db import init_schema, open_connection  # noqa: E402
+        from storage.pre_annotations import list_pre_annotations_for_run, upsert_pre_annotations_for_run  # noqa: E402
+        from storage.runs import create_run  # noqa: E402
+        from storage.stages import mark_stage_succeeded, reset_stage_and_downstream  # noqa: E402
+
+        uploaded_at = "2026-03-08T00:00:00+00:00"
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = os.path.join(tmpdir, "sp.db")
+            run_id = create_run(db_path)["run_id"]
+
+            mark_stage_succeeded(db_path, run_id, "parser", input_uploaded_at=uploaded_at, stats={"ok": True})
+            mark_stage_succeeded(db_path, run_id, "pre_annotation", input_uploaded_at=uploaded_at, stats={"ok": True})
+            mark_stage_succeeded(db_path, run_id, "classification", input_uploaded_at=uploaded_at, stats={"ok": True})
+
+            with open_connection(db_path) as conn:
+                init_schema(conn)
+                conn.execute(
+                    """
+                    INSERT INTO run_variants (
+                      variant_id, run_id, chrom, pos, ref, alt, source_line, created_at
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    ("v1", run_id, "1", 1, "A", "T", 1, uploaded_at),
+                )
+                conn.commit()
+
+            upsert_pre_annotations_for_run(
+                db_path,
+                run_id,
+                [
+                    {
+                        "variant_id": "v1",
+                        "variant_key": "1:1:A>T",
+                        "base_change": "A>T",
+                        "substitution_class": "transversion",
+                        "ref_class": "purine",
+                        "alt_class": "pyrimidine",
+                        "details": {"source_line": 1},
+                        "created_at": uploaded_at,
+                    }
+                ],
+            )
+            upsert_classifications_for_run(
+                db_path,
+                run_id,
+                [
+                    {
+                        "variant_id": "v1",
+                        "consequence_category": "unclassified",
+                        "reason_code": "NO_CODING_CONTEXT",
+                        "reason_message": "No context.",
+                        "details": {"source_line": 1},
+                        "created_at": uploaded_at,
+                    }
+                ],
+            )
+
+            self.assertEqual(len(list_pre_annotations_for_run(db_path, run_id)), 1)
+            self.assertEqual(len(list_classifications_for_run(db_path, run_id, limit=10)), 1)
+
+            reset_stage_and_downstream(db_path, run_id, "classification")
+
+            self.assertEqual(len(list_pre_annotations_for_run(db_path, run_id)), 1)
+            self.assertEqual(list_classifications_for_run(db_path, run_id, limit=10), [])
+
+    def test_reset_stage_and_downstream_clears_predictor_outputs_when_resetting_prediction(self):
+        from storage.db import init_schema, open_connection  # noqa: E402
+        from storage.predictor_outputs import (  # noqa: E402
+            list_predictor_outputs_for_run,
+            upsert_predictor_outputs_for_run,
+        )
+        from storage.runs import create_run  # noqa: E402
+        from storage.stages import mark_stage_succeeded, reset_stage_and_downstream  # noqa: E402
+
+        uploaded_at = "2026-03-08T00:00:00+00:00"
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = os.path.join(tmpdir, "sp.db")
+            run_id = create_run(db_path)["run_id"]
+
+            mark_stage_succeeded(db_path, run_id, "parser", input_uploaded_at=uploaded_at, stats={"ok": True})
+            mark_stage_succeeded(db_path, run_id, "pre_annotation", input_uploaded_at=uploaded_at, stats={"ok": True})
+            mark_stage_succeeded(db_path, run_id, "classification", input_uploaded_at=uploaded_at, stats={"ok": True})
+            mark_stage_succeeded(db_path, run_id, "prediction", input_uploaded_at=uploaded_at, stats={"ok": True})
+
+            with open_connection(db_path) as conn:
+                init_schema(conn)
+                conn.execute(
+                    """
+                    INSERT INTO run_variants (
+                      variant_id, run_id, chrom, pos, ref, alt, source_line, created_at
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    ("v1", run_id, "1", 1, "A", "T", 1, uploaded_at),
+                )
+                conn.commit()
+
+            upsert_predictor_outputs_for_run(
+                db_path,
+                run_id,
+                [
+                    {
+                        "variant_id": "v1",
+                        "predictor_key": "sift",
+                        "outcome": "not_computed",
+                        "score": None,
+                        "label": None,
+                        "reason_code": "NO_PROTEIN_CONTEXT",
+                        "reason_message": "No context.",
+                        "details": {"source_line": 1},
+                        "created_at": uploaded_at,
+                    }
+                ],
+            )
+
+            self.assertEqual(len(list_predictor_outputs_for_run(db_path, run_id, predictor_key="sift")), 1)
+
+            reset_stage_and_downstream(db_path, run_id, "prediction")
+
+            self.assertEqual(list_predictor_outputs_for_run(db_path, run_id, predictor_key="sift"), [])
+
     def test_reset_stage_and_downstream_rejects_unknown_stage(self):
         from storage.runs import create_run  # noqa: E402
         from storage.stages import reset_stage_and_downstream  # noqa: E402

@@ -175,10 +175,11 @@ class RetryStageApiTestCase(unittest.TestCase):
             resp = client.post(f"/api/v1/runs/{run_id}/stages/classification/retry")
             self.assertEqual(resp.status_code, 409)
             payload = json.loads(resp.get_data(as_text=True))
-            self.assertEqual(payload["error"]["code"], "STAGE_INPUT_MISMATCH")
+            # Uploading a new file now resets all stage statuses to queued,
+            # so retrying the old failed stage is rejected as not failed.
+            self.assertEqual(payload["error"]["code"], "STAGE_NOT_FAILED")
             self.assertEqual(payload["error"]["details"]["stage_name"], "classification")
-            self.assertEqual(payload["error"]["details"]["stage_input_uploaded_at"], uploaded_at_a)
-            self.assertEqual(payload["error"]["details"]["uploaded_at"], uploaded_at_b)
+            self.assertEqual(payload["error"]["details"]["current_status"], "queued")
 
 
 if __name__ == "__main__":

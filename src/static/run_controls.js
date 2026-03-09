@@ -1,5 +1,4 @@
 (() => {
-  const newRunBtn = document.getElementById("new-run-btn");
   const retryFailedStageBtn = document.getElementById("retry-failed-stage-btn");
   const cancelRunBtn = document.getElementById("cancel-run-btn");
   const runIdEl = document.getElementById("current-run-id");
@@ -11,7 +10,6 @@
   const liveUpdatesEl = document.getElementById("live-updates-indicator");
 
   if (
-    !newRunBtn ||
     !cancelRunBtn ||
     !runIdEl ||
     !statusEl ||
@@ -62,7 +60,7 @@
 
   function formatStatus(status) {
     if (!status) return "No run";
-    if (status === "queued") return "Queued";
+    if (status === "queued") return "Idle";
     if (status === "running") return "Running";
     if (status === "succeeded") return "Succeeded";
     if (status === "failed") return "Failed";
@@ -154,6 +152,11 @@
     detail.dataset.role = "stage-error";
     body.appendChild(detail);
 
+    const statsLine = document.createElement("div");
+    statsLine.className = "small text-secondary";
+    statsLine.dataset.role = "stage-stats";
+    body.appendChild(statsLine);
+
     const timing = document.createElement("div");
     timing.className = "small text-secondary mt-1";
     timing.dataset.role = "stage-timing";
@@ -185,6 +188,105 @@
     li.appendChild(badge);
     stagesEl.appendChild(li);
     return li;
+  }
+
+  function basename(path) {
+    if (!path) return "";
+    const text = String(path);
+    const parts = text.split(/[/\\\\]+/);
+    return parts[parts.length - 1] || text;
+  }
+
+  function sanitizeInline(text, maxLen = 240) {
+    if (!text) return "";
+    const compact = String(text).replace(/\s+/g, " ").trim();
+    if (compact.length <= maxLen) return compact;
+    return `${compact.slice(0, maxLen)}\u2026`;
+  }
+
+  function renderStageStats(stageName, stage, statsEl) {
+    if (!statsEl) return;
+    clearEl(statsEl);
+
+    const stats = stage?.stats ?? null;
+    const error = stage?.error ?? null;
+
+    const normalizedName = String(stageName || "");
+    const tool = stats && typeof stats === "object" ? stats?.tool ?? null : null;
+    const note = stats && typeof stats === "object" ? stats?.note ?? null : null;
+
+    let text = "";
+    if (
+      normalizedName === "annotation" &&
+      error?.code === "SNPEFF_NOT_CONFIGURED" &&
+      error?.details?.hint
+    ) {
+      text = String(error.details.hint);
+    } else if (
+      normalizedName === "annotation" &&
+      error?.code === "SNPEFF_DATADIR_INVALID" &&
+      error?.details?.hint
+    ) {
+      text = String(error.details.hint);
+    } else if (
+      normalizedName === "annotation" &&
+      error?.code === "SNPEFF_DB_MISSING" &&
+      error?.details?.expected_db_file
+    ) {
+      text = `Missing DB: ${sanitizeInline(error.details.expected_db_file, 180)}`;
+    } else if (
+      normalizedName === "annotation" &&
+      error?.code === "SNPEFF_FAILED" &&
+      error?.details?.stderr_tail
+    ) {
+      text = `stderr: ${sanitizeInline(error.details.stderr_tail, 220)}`;
+    } else if (normalizedName === "parser" && stats?.snv_records_persisted != null) {
+      text = `SNVs persisted: ${stats.snv_records_persisted}`;
+    } else if (
+      normalizedName === "pre_annotation" &&
+      stats?.variants_processed != null
+    ) {
+      text = `Variants processed: ${stats.variants_processed}`;
+    } else if (
+      normalizedName === "classification" &&
+      stats?.variants_processed != null
+    ) {
+      const counts = stats?.category_counts;
+      if (counts && typeof counts === "object") {
+        const parts = [];
+        for (const key of ["missense", "synonymous", "nonsense", "other", "unclassified"]) {
+          const value = counts?.[key];
+          if (value != null) parts.push(`${key}: ${value}`);
+        }
+        text = parts.length > 0
+          ? `Variants processed: ${stats.variants_processed}. ${parts.join(", ")}.`
+          : `Variants processed: ${stats.variants_processed}`;
+      } else {
+        text = `Variants processed: ${stats.variants_processed}`;
+      }
+    } else if (normalizedName === "prediction" && stats?.variants_processed != null) {
+      text = `Variants processed: ${stats.variants_processed}`;
+    } else if (normalizedName === "annotation" && tool === "snpeff") {
+      if (note) {
+        text = String(note);
+      } else if (stats?.output_vcf_path) {
+        text = `SnpEff output: ${basename(stats.output_vcf_path)}`;
+      } else {
+        text = "SnpEff completed.";
+      }
+    } else if (note) {
+      text = String(note);
+    }
+
+    if (!text) {
+      statsEl.style.display = "none";
+      return;
+    }
+
+    const span = document.createElement("span");
+    span.textContent = text;
+    statsEl.appendChild(span);
+    statsEl.style.display = "";
   }
 
   function updateElapsedForRow(li) {
@@ -305,6 +407,13 @@
           const parts = [];
           if (error.code) parts.push(String(error.code));
           if (error.message) parts.push(String(error.message));
+          if (
+            stageName === "annotation" &&
+            error?.code === "SNPEFF_FAILED" &&
+            error?.details?.exit_code != null
+          ) {
+            parts.push(`exit_code=${error.details.exit_code}`);
+          }
           errorEl.textContent = parts.join(": ");
           errorEl.style.display = "";
         } else {
@@ -312,6 +421,9 @@
           errorEl.style.display = "none";
         }
       }
+
+      const statsEl = li.querySelector('[data-role="stage-stats"]');
+      renderStageStats(stageName, stage ?? null, statsEl);
 
       const status = stage?.status ?? "queued";
       li.dataset.stageStatus = status;
@@ -369,6 +481,22 @@
       }
       eventSource = null;
     }
+  }
+
+  function resetTaskQueueState() {
+    closeEventSource();
+    stopElapsedTimer();
+    currentRunId = null;
+    currentRunStatus = null;
+    lastStagesSnapshot = null;
+    runIdEl.textContent = "\u2014";
+    statusEl.textContent = formatStatus(null);
+    referenceBuildEl.textContent = "\u2014";
+    updateCancelVisibility(null);
+    renderStages(null);
+    setStagesMessage("Choose a VCF file and press Start.");
+    setLiveUpdates(null, "Not connected.");
+    clearMessage();
   }
 
   async function reconcileAfterReconnect(runId) {
@@ -447,7 +575,7 @@
       statusEl.className = "text-secondary";
     }
 
-    cancelRunBtn.disabled = !currentRunId || status === "canceled";
+    updateCancelVisibility(status);
     updateRetryControl(lastStagesSnapshot);
     ensureEventSource(currentRunId);
 
@@ -485,6 +613,14 @@
     return { resp, payload };
   }
 
+  function updateCancelVisibility(status) {
+    const normalized = status || null;
+    const hasRun = Boolean(currentRunId);
+    const isRunning = normalized === "running";
+    cancelRunBtn.hidden = !hasRun || !isRunning;
+    cancelRunBtn.disabled = !hasRun || !isRunning;
+  }
+
   async function getJson(url) {
     const resp = await fetch(url, {
       method: "GET",
@@ -520,7 +656,7 @@
   async function refreshStagesFromServer(runId) {
     if (!runId) {
       renderStages(null);
-      setStagesMessage("Create a run to see stage status.");
+      setStagesMessage("Choose a VCF file and press Start.");
       return;
     }
 
@@ -541,26 +677,6 @@
       setStagesMessage("Unable to load stage status right now.");
     }
   }
-
-  newRunBtn.addEventListener("click", async () => {
-    newRunBtn.disabled = true;
-    setMessage(null, "");
-    try {
-      const { resp, payload } = await postJson("/api/v1/runs");
-      if (!resp.ok || !payload?.ok) {
-        const msg = payload?.error?.message ?? "Failed to create run.";
-        setMessage("error", msg);
-        return;
-      }
-      setRun(payload.data);
-      void refreshStagesFromServer(payload.data?.run_id);
-      setMessage("success", "Run created.");
-    } catch {
-      setMessage("error", "Failed to create run.");
-    } finally {
-      newRunBtn.disabled = false;
-    }
-  });
 
   if (retryFailedStageBtn) {
     retryFailedStageBtn.addEventListener("click", async () => {
@@ -627,6 +743,26 @@
     }
   });
 
+  window.addEventListener("sp:run-changed", (evt) => {
+    const detail = evt?.detail ?? null;
+    const run = detail?.run ?? detail ?? null;
+    if (!run?.run_id) {
+      setRun(null);
+      renderStages(null);
+      setStagesMessage("Choose a VCF file and press Start.");
+      setLiveUpdates(null, "Not connected.");
+      clearMessage();
+      return;
+    }
+    setRun(run);
+    void refreshFromServer(run.run_id);
+    void refreshStagesFromServer(run.run_id);
+  });
+
+  window.addEventListener("sp:task-queue-reset", () => {
+    resetTaskQueueState();
+  });
+
   try {
     const stored = JSON.parse(localStorage.getItem(STORAGE_KEY));
     if (stored?.run_id) {
@@ -635,13 +771,13 @@
       void refreshStagesFromServer(stored.run_id);
     } else {
       renderStages(null);
-      setStagesMessage("Create a run to see stage status.");
+      setStagesMessage("Choose a VCF file and press Start.");
       setLiveUpdates(null, "");
     }
   } catch {
     // ignore storage failures
     renderStages(null);
-    setStagesMessage("Create a run to see stage status.");
+    setStagesMessage("Choose a VCF file and press Start.");
     setLiveUpdates(null, "");
   }
 })();

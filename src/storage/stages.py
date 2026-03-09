@@ -200,6 +200,7 @@ def mark_stage_running(
               error_code = NULL,
               error_message = NULL,
               error_details_json = NULL
+            WHERE run_stages.status != 'canceled'
             """,
             (run_id, stage_name, "running", started_at, input_uploaded_at),
         )
@@ -262,6 +263,21 @@ def reset_stage_and_downstream(
 
                 clear_variants_for_run(db_path, run_id, conn=active, commit=False)
 
+            if "pre_annotation" in stages_to_reset:
+                from storage.pre_annotations import clear_pre_annotations_for_run
+
+                clear_pre_annotations_for_run(db_path, run_id, conn=active, commit=False)
+
+            if "classification" in stages_to_reset:
+                from storage.classifications import clear_classifications_for_run
+
+                clear_classifications_for_run(db_path, run_id, conn=active, commit=False)
+
+            if "prediction" in stages_to_reset:
+                from storage.predictor_outputs import clear_predictor_outputs_for_run
+
+                clear_predictor_outputs_for_run(db_path, run_id, conn=active, commit=False)
+
             if commit and began_transaction:
                 active.commit()
         except Exception:
@@ -300,6 +316,7 @@ def mark_stage_succeeded(
               error_code = NULL,
               error_message = NULL,
               error_details_json = NULL
+            WHERE run_stages.status != 'canceled'
             """,
             (run_id, stage_name, "succeeded", completed_at, input_uploaded_at, json.dumps(stats)),
         )
@@ -337,6 +354,7 @@ def mark_stage_failed(
               error_code = excluded.error_code,
               error_message = excluded.error_message,
               error_details_json = excluded.error_details_json
+            WHERE run_stages.status != 'canceled'
             """,
             (
                 run_id,

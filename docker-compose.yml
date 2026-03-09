@@ -1,0 +1,85 @@
+services:
+  sp-vep-init:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: sp-local:latest
+    command: ["/bin/bash", "/app/scripts/setup_vep_runtime.sh"]
+    environment:
+      VEP_ROOT: /opt/vep
+      VEP_RELEASE: "115"
+      VEP_SPECIES: homo_sapiens
+      VEP_ASSEMBLY: GRCh38
+      PERL5LIB: /opt/vep/ensembl-vep:/opt/vep/ensembl-vep/modules
+      LD_LIBRARY_PATH: /opt/vep/ensembl-vep/htslib
+      ALPHAMISSENSE_FILE_NAME: AlphaMissense_hg38.tsv.gz
+      ALPHAMISSENSE_URL: https://storage.googleapis.com/dm_alphamissense/AlphaMissense_hg38.tsv.gz
+    volumes:
+      - vep-data:/opt/vep
+    restart: "no"
+
+  sp-snpeff-init:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: sp-local:latest
+    command: ["/bin/bash", "/app/scripts/setup_snpeff_runtime.sh"]
+    environment:
+      SNPEFF_ROOT: /opt/snpeff
+      SNPEFF_HOME: /opt/snpeff/snpEff
+      SNPEFF_JAR_PATH: /opt/snpeff/snpEff/snpEff.jar
+      SNPEFF_GENOME: GRCh38.86
+      SNPEFF_DATA_DIR: ./data
+      SNPEFF_ZIP_URL: https://snpeff.blob.core.windows.net/versions/snpEff_latest_core.zip
+      SP_JAVA_CMD: java
+      SP_SNPEFF_JAVA_XMX: 2g
+    volumes:
+      - snpeff-data:/opt/snpeff
+    restart: "no"
+
+  sp:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: sp-local:latest
+    depends_on:
+      sp-vep-init:
+        condition: service_completed_successfully
+      sp-snpeff-init:
+        condition: service_completed_successfully
+    ports:
+      - "8000:8000"
+    environment:
+      SP_HOST: 0.0.0.0
+      SP_PORT: "8000"
+      SP_WAITRESS_THREADS: "16"
+      SP_DB_PATH: /app/instance/sp.db
+      SP_SNPEFF_ENABLED: "1"
+      SP_SNPEFF_HOME: /opt/snpeff/snpEff
+      SP_SNPEFF_JAR_PATH: /opt/snpeff/snpEff/snpEff.jar
+      SP_SNPEFF_DATA_DIR: ./data
+      SP_SNPEFF_GENOME: GRCh38.86
+      SP_JAVA_CMD: java
+      SP_SNPEFF_JAVA_XMX: 2g
+      SP_SNPEFF_TIMEOUT_SECONDS: "1800"
+      SP_SNPEFF_ARGS: -noStats
+      SP_VEP_CMD: perl
+      SP_VEP_SCRIPT_PATH: /opt/vep/ensembl-vep/vep
+      SP_VEP_CACHE_DIR: /opt/vep/.vep
+      SP_VEP_PLUGIN_DIR: /opt/vep/.vep/Plugins
+      SP_VEP_ALPHAMISSENSE_FILE: /opt/vep/.vep/Plugins/AlphaMissense_hg38.tsv.gz
+      SP_VEP_ASSEMBLY: GRCh38
+      SP_VEP_TIMEOUT_SECONDS: "1800"
+      PERL5LIB: /opt/vep/ensembl-vep:/opt/vep/ensembl-vep/modules
+      LD_LIBRARY_PATH: /opt/vep/ensembl-vep/htslib
+    volumes:
+      - instance-data:/app/instance
+      - vep-data:/opt/vep:ro
+      - snpeff-data:/opt/snpeff:ro
+    command: ["python", "src/serve.py"]
+    restart: unless-stopped
+
+volumes:
+  instance-data:
+  vep-data:
+  snpeff-data:

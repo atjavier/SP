@@ -193,6 +193,14 @@ def cancel_run(db_path: str, run_id: str) -> dict[str, str]:
                 """,
                 ("canceled", canceled_at, run_id, "queued", "running"),
             )
+
+            from storage.classifications import clear_classifications_for_run
+            from storage.pre_annotations import clear_pre_annotations_for_run
+            from storage.predictor_outputs import clear_predictor_outputs_for_run
+
+            clear_pre_annotations_for_run(db_path, run_id, conn=conn, commit=False)
+            clear_classifications_for_run(db_path, run_id, conn=conn, commit=False)
+            clear_predictor_outputs_for_run(db_path, run_id, conn=conn, commit=False)
             conn.commit()
 
             row = conn.execute(
