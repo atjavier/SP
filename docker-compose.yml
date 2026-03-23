@@ -92,10 +92,15 @@ services:
       SP_VEP_ALPHAMISSENSE_FILE: /opt/vep/.vep/Plugins/AlphaMissense_hg38.tsv.gz
       SP_VEP_ASSEMBLY: GRCh38
       SP_VEP_TIMEOUT_SECONDS: "1800"
+      SP_VEP_BATCH_SIZE: "40000"
+      SP_VEP_EXTRA_ARGS: "--fork 8"
       SP_EVIDENCE_PROFILE: predictor_only
       SP_EVIDENCE_MODE: ${SP_EVIDENCE_MODE:-hybrid}
       SP_DBSNP_LOCAL_VCF_PATH: ${SP_DBSNP_LOCAL_VCF_PATH:-/opt/evidence/dbsnp/dbsnp_all_grch38.vcf.gz}
       SP_CLINVAR_LOCAL_VCF_PATH: ${SP_CLINVAR_LOCAL_VCF_PATH:-/opt/evidence/clinvar/clinvar_grch38.vcf.gz}
+      SP_DBSNP_MAX_WORKERS: "4"
+      SP_CLINVAR_MAX_WORKERS: "4"
+      SP_GNOMAD_MAX_WORKERS: "2"
       PERL5LIB: /opt/vep/ensembl-vep:/opt/vep/ensembl-vep/modules
       LD_LIBRARY_PATH: /opt/vep/ensembl-vep/htslib
     volumes:

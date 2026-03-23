@@ -3,7 +3,7 @@ import os
 from datetime import datetime, timezone
 
 from storage.db import init_schema, open_connection
-from storage.runs import get_run
+from storage.runs import get_run, reset_run_evidence_mode_decision
 from storage.stages import reset_stage_and_downstream
 from vcf_validation import validate_vcf_path
 
@@ -90,6 +90,13 @@ def store_run_vcf(db_path: str, run_id: str, *, file_storage) -> dict:
             db_path,
             run_id,
             "parser",
+            conn=conn,
+            commit=False,
+        )
+        # A new upload invalidates previous mode-detection telemetry for this run.
+        reset_run_evidence_mode_decision(
+            db_path,
+            run_id,
             conn=conn,
             commit=False,
         )

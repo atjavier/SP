@@ -5,6 +5,9 @@ import sys
 import tempfile
 import time
 import unittest
+import threading
+import sqlite3
+import shutil
 
 
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
@@ -119,6 +122,108 @@ class SseEventsApiTestCase(unittest.TestCase):
             self.assertTrue(any_run_status)
             self.assertTrue(any_stage_status)
             self.assertTrue(any_parser_progress)
+
+    def test_events_stream_emits_variant_result_on_stage_completion(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = os.path.join(tmpdir, "sp.db")
+            client = self._create_client(db_path)
+
+            run_id = self._create_run(client)
+
+            resp = client.get(
+                f"/api/v1/runs/{run_id}/events",
+                buffered=False,
+                headers={"Accept": "text/event-stream"},
+            )
+            self.assertEqual(resp.status_code, 200)
+
+            def _mark_parser_succeeded():
+                time.sleep(0.15)
+                from storage.stages import mark_stage_succeeded  # noqa: E402
+
+                mark_stage_succeeded(
+                    db_path,
+                    run_id,
+                    "parser",
+                    input_uploaded_at=None,
+                    stats={"variants_written": 1},
+                )
+
+            threading.Thread(target=_mark_parser_succeeded, daemon=True).start()
+
+            try:
+                events = self._read_sse_events(resp, max_events=9, timeout_s=4.0)
+                any_variant_result = False
+                for name, data in events:
+                    if name != "variant_result":
+                        continue
+                    payload = json.loads(data)
+                    self.assertEqual(payload["run_id"], run_id)
+                    self.assertIn("event_at", payload)
+                    self.assertIsInstance(payload["event_at"], str)
+                    self.assertIn("data", payload)
+                    self.assertEqual(payload["data"].get("stage_name"), "parser")
+                    self.assertEqual(payload["data"].get("status"), "succeeded")
+                    any_variant_result = True
+
+                self.assertTrue(any_variant_result)
+            finally:
+                resp.close()
+
+    def test_events_stream_emits_variant_result_on_stats_change(self):
+        tmpdir = tempfile.mkdtemp()
+        try:
+            db_path = os.path.join(tmpdir, "sp.db")
+            client = self._create_client(db_path)
+
+            run_id = self._create_run(client)
+
+            resp = client.get(
+                f"/api/v1/runs/{run_id}/events",
+                buffered=False,
+                headers={"Accept": "text/event-stream"},
+            )
+            self.assertEqual(resp.status_code, 200)
+
+            def _update_stats():
+                time.sleep(0.15)
+                from storage.stages import mark_stage_running  # noqa: E402
+
+                mark_stage_running(
+                    db_path,
+                    run_id,
+                    "parser",
+                    input_uploaded_at=None,
+                )
+                with sqlite3.connect(db_path) as conn:
+                    conn.execute(
+                        "UPDATE run_stages SET stats_json = ? WHERE run_id = ? AND stage_name = ?",
+                        (json.dumps({"variants_written": 2}), run_id, "parser"),
+                    )
+                    conn.commit()
+
+            threading.Thread(target=_update_stats, daemon=True).start()
+
+            try:
+                events = self._read_sse_events(resp, max_events=12, timeout_s=4.0)
+                any_variant_result = False
+                for name, data in events:
+                    if name != "variant_result":
+                        continue
+                    payload = json.loads(data)
+                    if payload.get("data", {}).get("stage_name") != "parser":
+                        continue
+                    self.assertEqual(payload["run_id"], run_id)
+                    self.assertEqual(payload["data"].get("status"), "running")
+                    self.assertEqual(payload["data"].get("variants_written"), 2)
+                    any_variant_result = True
+
+                self.assertTrue(any_variant_result)
+            finally:
+                resp.close()
+                time.sleep(0.2)
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
 
 
 if __name__ == "__main__":

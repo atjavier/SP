@@ -99,10 +99,29 @@ def list_classifications_for_run(
     db_path: str,
     run_id: str,
     *,
+    variant_id: str | None = None,
     limit: int = 100,
+    offset: int = 0,
+    category: str | None = None,
     conn: sqlite3.Connection | None = None,
 ) -> list[dict]:
     safe_limit = max(1, min(int(limit or 100), 1000))
+    safe_offset = max(0, int(offset or 0))
+    requested_category = (category or "").strip().lower() or None
+    if requested_category and requested_category not in _VALID_CONSEQUENCE_CATEGORIES:
+        requested_category = None
+    requested_variant_id = (variant_id or "").strip() or None
+    if requested_variant_id:
+        safe_offset = 0
+
+    where = ["c.run_id = ?"]
+    params: list[object] = [run_id]
+    if requested_category:
+        where.append("c.consequence_category = ?")
+        params.append(requested_category)
+    if requested_variant_id:
+        where.append("c.variant_id = ?")
+        params.append(requested_variant_id)
 
     with _maybe_connection(db_path, conn) as active:
         init_schema(active)
@@ -123,13 +142,14 @@ def list_classifications_for_run(
               c.created_at
             FROM run_classifications c
             JOIN run_variants v ON v.variant_id = c.variant_id AND v.run_id = c.run_id
-            WHERE c.run_id = ?
+            WHERE
             """
+            + " AND ".join(where)
             + _CLASSIFICATION_ORDER_BY
             + """
-            LIMIT ?
+            LIMIT ? OFFSET ?
             """,
-            (run_id, safe_limit),
+            (*params, safe_limit, safe_offset),
         ).fetchall()
 
     items: list[dict] = []
@@ -157,3 +177,39 @@ def list_classifications_for_run(
         )
 
     return items
+
+
+def count_classifications_for_run(
+    db_path: str,
+    run_id: str,
+    *,
+    variant_id: str | None = None,
+    category: str | None = None,
+    conn: sqlite3.Connection | None = None,
+) -> int:
+    requested_category = (category or "").strip().lower() or None
+    if requested_category and requested_category not in _VALID_CONSEQUENCE_CATEGORIES:
+        requested_category = None
+    requested_variant_id = (variant_id or "").strip() or None
+
+    where = ["c.run_id = ?"]
+    params: list[object] = [run_id]
+    if requested_category:
+        where.append("c.consequence_category = ?")
+        params.append(requested_category)
+    if requested_variant_id:
+        where.append("c.variant_id = ?")
+        params.append(requested_variant_id)
+
+    with _maybe_connection(db_path, conn) as active:
+        init_schema(active)
+        row = active.execute(
+            """
+            SELECT COUNT(*)
+            FROM run_classifications c
+            WHERE
+            """
+            + " AND ".join(where),
+            params,
+        ).fetchone()
+    return int(row[0] if row else 0)

@@ -1,5 +1,8 @@
+import glob
+import json
 import os
 import secrets
+import sqlite3
 import sys
 import threading
 import time
@@ -105,6 +108,144 @@ def create_app(config_overrides: dict[str, Any] | None = None) -> Flask:
     @app.get("/")
     def index():
         return render_template("index.html")
+
+    def _serialize_run_for_response(
+        run: dict | None,
+        *,
+        run_id: str | None = None,
+        status_override: str | None = None,
+    ) -> dict[str, Any]:
+        payload = dict(run or {})
+        if run_id is not None:
+            payload["run_id"] = run_id
+        if status_override is not None:
+            payload["status"] = status_override
+        return {
+            "run_id": payload.get("run_id"),
+            "status": payload.get("status"),
+            "created_at": payload.get("created_at"),
+            "reference_build": payload.get("reference_build"),
+            "annotation_evidence_policy": payload.get("annotation_evidence_policy"),
+            "evidence_mode_requested": payload.get("evidence_mode_requested"),
+            "evidence_mode_effective": payload.get("evidence_mode_effective"),
+            "evidence_online_available": payload.get("evidence_online_available"),
+            "evidence_offline_sources_configured": payload.get("evidence_offline_sources_configured") or {},
+            "evidence_mode_decision_reason": payload.get("evidence_mode_decision_reason"),
+            "evidence_mode_detected_at": payload.get("evidence_mode_detected_at"),
+        }
+
+    def _determine_terminal_run_status(db_path: str, run_id: str) -> str:
+        """
+        Keep run-level status aligned with the latest attempt outcome:
+        - failed if any latest-upload stage failed
+        - queued otherwise
+        """
+        from storage.run_inputs import get_run_input
+        from storage.stages import list_pipeline_stages
+
+        run_input = get_run_input(db_path, run_id) or {}
+        latest_uploaded_at = run_input.get("uploaded_at")
+        if not latest_uploaded_at:
+            return "queued"
+
+        stages = list_pipeline_stages(db_path, run_id)
+        for stage in stages:
+            if stage.get("input_uploaded_at") != latest_uploaded_at:
+                continue
+            if (stage.get("status") or "").strip().lower() == "failed":
+                return "failed"
+        return "queued"
+
+    def _stage_ready_for_latest_upload(db_path: str, run_id: str, stage_name: str) -> bool:
+        from storage.run_inputs import get_run_input
+        from storage.stages import get_stage
+
+        run_input = get_run_input(db_path, run_id) or {}
+        latest_uploaded_at = run_input.get("uploaded_at")
+        if not latest_uploaded_at:
+            return False
+        stage = get_stage(db_path, run_id, stage_name) or {}
+        return (
+            stage.get("status") == "succeeded"
+            and stage.get("input_uploaded_at") == latest_uploaded_at
+        )
+
+    def _build_run_logger(run_id: str):
+        from run_logging import build_run_logger
+
+        instance_dir = os.path.dirname(app.config["SP_DB_PATH"])
+        return build_run_logger(run_id, instance_dir=instance_dir)
+
+    def _finalize_run_status(
+        db_path: str,
+        run_id: str,
+        *,
+        force_failed: bool = False,
+        max_attempts: int = 3,
+    ) -> str:
+        from storage.runs import get_run as get_run_record, set_run_status_if_not_canceled
+
+        current = get_run_record(db_path, run_id) or {}
+        was_canceled = current.get("status") == "canceled"
+
+        if force_failed:
+            terminal_status = "failed"
+        else:
+            terminal_status = None
+            for attempt in range(1, max_attempts + 1):
+                try:
+                    terminal_status = _determine_terminal_run_status(db_path, run_id)
+                    break
+                except sqlite3.OperationalError as exc:
+                    if "locked" not in str(exc).lower() or attempt >= max_attempts:
+                        app.logger.exception(
+                            "Failed to determine terminal run status for run_id=%s",
+                            run_id,
+                        )
+                        break
+                    time.sleep(0.1 * attempt)
+                except Exception:
+                    app.logger.exception(
+                        "Failed to determine terminal run status for run_id=%s",
+                        run_id,
+                    )
+                    break
+            if terminal_status is None:
+                # Prefer idling over a false-negative failed status when final status
+                # cannot be confidently determined (for example transient DB contention).
+                terminal_status = "queued"
+
+        for attempt in range(1, max_attempts + 1):
+            try:
+                set_run_status_if_not_canceled(db_path, run_id, terminal_status)
+                break
+            except Exception:
+                if attempt >= max_attempts:
+                    app.logger.exception("Failed to reset run status for run_id=%s", run_id)
+                    break
+                # Brief backoff for transient sqlite lock contention.
+                time.sleep(0.1 * attempt)
+        if was_canceled:
+            return "canceled"
+        return terminal_status
+
+    def _determine_final_status_for_logging(
+        db_path: str,
+        run_id: str,
+        *,
+        force_failed: bool = False,
+    ) -> str:
+        from storage.runs import get_run as get_run_record
+
+        if force_failed:
+            return "failed"
+        run = get_run_record(db_path, run_id) or {}
+        if run.get("status") == "canceled":
+            return "canceled"
+        try:
+            return _determine_terminal_run_status(db_path, run_id)
+        except Exception:
+            return "queued"
 
     @app.post("/api/v1/runs")
     def create_run():
@@ -223,6 +364,71 @@ def create_app(config_overrides: dict[str, Any] | None = None) -> Flask:
             )
 
         return jsonify({"ok": True, "data": record})
+
+    @app.get("/api/v1/runs/<run_id>/logs")
+    def get_run_logs(run_id: str):
+        from collections import deque
+        from storage.runs import get_run as get_run_record
+
+        db_path = app.config["SP_DB_PATH"]
+        limit_raw = (request.args.get("limit") or "").strip()
+        limit = 200
+        if limit_raw:
+            try:
+                limit = int(limit_raw)
+            except ValueError:
+                limit = 200
+        limit = max(1, min(limit, 1000))
+
+        try:
+            run = get_run_record(db_path, run_id)
+        except Exception:
+            app.logger.exception("Failed to fetch run record for log listing")
+            return (
+                jsonify(
+                    {
+                        "ok": False,
+                        "error": {"code": "RUN_FETCH_FAILED", "message": "Failed to fetch run record."},
+                    }
+                ),
+                500,
+            )
+
+        if not run:
+            return (
+                jsonify({"ok": False, "error": {"code": "RUN_NOT_FOUND", "message": "Run not found."}}),
+                404,
+            )
+
+        instance_dir = os.path.dirname(db_path)
+        log_path = os.path.join(instance_dir, "logs", "runs", f"{run_id}.log")
+        if not os.path.isfile(log_path):
+            return jsonify({"ok": True, "data": {"run_id": run_id, "logs": []}})
+
+        logs: list[dict] = []
+        try:
+            with open(log_path, "r", encoding="utf-8") as handle:
+                tail = deque(handle, maxlen=limit)
+            for line in tail:
+                if not line.strip():
+                    continue
+                try:
+                    logs.append(json.loads(line))
+                except json.JSONDecodeError:
+                    continue
+        except Exception:
+            app.logger.exception("Failed to read run logs for run_id=%s", run_id)
+            return (
+                jsonify(
+                    {
+                        "ok": False,
+                        "error": {"code": "RUN_LOGS_FAILED", "message": "Failed to read run logs."},
+                    }
+                ),
+                500,
+            )
+
+        return jsonify({"ok": True, "data": {"run_id": run_id, "logs": logs}})
 
     @app.post("/api/v1/runs/<run_id>/settings")
     def update_run_settings(run_id: str):
@@ -387,7 +593,15 @@ def create_app(config_overrides: dict[str, Any] | None = None) -> Flask:
             )
 
         try:
-            stages = list_pipeline_stages(db_path, run_id)
+            stages = None
+            for attempt in range(1, 4):
+                try:
+                    stages = list_pipeline_stages(db_path, run_id)
+                    break
+                except sqlite3.OperationalError as exc:
+                    if "locked" not in str(exc).lower() or attempt >= 3:
+                        raise
+                    time.sleep(0.05 * attempt)
         except Exception:
             app.logger.exception("Failed to fetch run stages")
             return (
@@ -403,17 +617,20 @@ def create_app(config_overrides: dict[str, Any] | None = None) -> Flask:
                 500,
             )
 
-        return jsonify({"ok": True, "data": {"run_id": run_id, "stages": stages}})
+        return jsonify({"ok": True, "data": {"run_id": run_id, "stages": stages or []}})
 
     @app.get("/api/v1/runs/<run_id>/classifications")
     def get_run_classifications(run_id: str):
-        from storage.classifications import list_classifications_for_run
+        from storage.classifications import count_classifications_for_run, list_classifications_for_run
         from storage.runs import get_run as get_run_record
         from storage.run_inputs import get_run_input
         from storage.stages import get_stage
 
         db_path = app.config["SP_DB_PATH"]
         limit_raw = (request.args.get("limit") or "").strip()
+        offset_raw = (request.args.get("offset") or "").strip()
+        category = (request.args.get("category") or "").strip().lower() or None
+        variant_id = (request.args.get("variant_id") or "").strip() or None
         limit = 100
         if limit_raw:
             try:
@@ -421,6 +638,13 @@ def create_app(config_overrides: dict[str, Any] | None = None) -> Flask:
             except ValueError:
                 limit = 100
         limit = max(1, min(limit, 1000))
+        offset = 0
+        if offset_raw:
+            try:
+                offset = int(offset_raw)
+            except ValueError:
+                offset = 0
+        offset = max(0, offset)
 
         try:
             run = get_run_record(db_path, run_id)
@@ -459,12 +683,25 @@ def create_app(config_overrides: dict[str, Any] | None = None) -> Flask:
                         "run_id": run_id,
                         "stage": stage or None,
                         "classifications": [],
+                        "limit": limit,
+                        "offset": offset,
+                        "total_count": 0,
+                        "category": category,
+                        "variant_id": variant_id,
                     },
                 }
             )
 
         try:
-            rows = list_classifications_for_run(db_path, run_id, limit=limit)
+            rows = list_classifications_for_run(
+                db_path,
+                run_id,
+                limit=limit,
+                offset=offset,
+                category=category,
+                variant_id=variant_id,
+            )
+            total_count = count_classifications_for_run(db_path, run_id, category=category, variant_id=variant_id)
         except Exception:
             app.logger.exception("Failed to fetch classifications for run_id=%s", run_id)
             return (
@@ -480,17 +717,32 @@ def create_app(config_overrides: dict[str, Any] | None = None) -> Flask:
                 500,
             )
 
-        return jsonify({"ok": True, "data": {"run_id": run_id, "stage": stage or None, "classifications": rows}})
+        return jsonify(
+            {
+                "ok": True,
+                "data": {
+                    "run_id": run_id,
+                    "stage": stage or None,
+                    "classifications": rows,
+                    "limit": limit,
+                    "offset": offset,
+                    "total_count": total_count,
+                    "category": category,
+                    "variant_id": variant_id,
+                },
+            }
+        )
 
     @app.get("/api/v1/runs/<run_id>/predictor_outputs")
     def get_run_predictor_outputs(run_id: str):
-        from storage.predictor_outputs import list_predictor_outputs_for_run
+        from storage.predictor_outputs import count_predictor_outputs_for_run, list_predictor_outputs_for_run
         from storage.runs import get_run as get_run_record
         from storage.run_inputs import get_run_input
         from storage.stages import get_stage
 
         db_path = app.config["SP_DB_PATH"]
         limit_raw = (request.args.get("limit") or "").strip()
+        offset_raw = (request.args.get("offset") or "").strip()
         limit = 100
         if limit_raw:
             try:
@@ -498,6 +750,13 @@ def create_app(config_overrides: dict[str, Any] | None = None) -> Flask:
             except ValueError:
                 limit = 100
         limit = max(1, min(limit, 1000))
+        offset = 0
+        if offset_raw:
+            try:
+                offset = int(offset_raw)
+            except ValueError:
+                offset = 0
+        offset = max(0, offset)
 
         predictor_key = (request.args.get("predictor_key") or "").strip() or None
         variant_id = (request.args.get("variant_id") or "").strip() or None
@@ -539,6 +798,11 @@ def create_app(config_overrides: dict[str, Any] | None = None) -> Flask:
                         "run_id": run_id,
                         "stage": stage or None,
                         "predictor_outputs": [],
+                        "limit": limit,
+                        "offset": offset,
+                        "total_count": 0,
+                        "predictor_key": predictor_key,
+                        "variant_id": variant_id,
                     },
                 }
             )
@@ -550,6 +814,13 @@ def create_app(config_overrides: dict[str, Any] | None = None) -> Flask:
                 predictor_key=predictor_key,
                 variant_id=variant_id,
                 limit=limit,
+                offset=offset,
+            )
+            total_count = count_predictor_outputs_for_run(
+                db_path,
+                run_id,
+                predictor_key=predictor_key,
+                variant_id=variant_id,
             )
         except Exception:
             app.logger.exception("Failed to fetch predictor outputs for run_id=%s", run_id)
@@ -566,17 +837,35 @@ def create_app(config_overrides: dict[str, Any] | None = None) -> Flask:
                 500,
             )
 
-        return jsonify({"ok": True, "data": {"run_id": run_id, "stage": stage or None, "predictor_outputs": rows}})
+        return jsonify(
+            {
+                "ok": True,
+                "data": {
+                    "run_id": run_id,
+                    "stage": stage or None,
+                    "predictor_outputs": rows,
+                    "limit": limit,
+                    "offset": offset,
+                    "total_count": total_count,
+                    "predictor_key": predictor_key,
+                    "variant_id": variant_id,
+                },
+            }
+        )
 
     @app.get("/api/v1/runs/<run_id>/pre_annotations")
     def get_run_pre_annotations(run_id: str):
-        from storage.pre_annotations import list_pre_annotations_for_run_public
+        from storage.pre_annotations import (
+            count_pre_annotations_for_run_public,
+            list_pre_annotations_for_run_public,
+        )
         from storage.runs import get_run as get_run_record
         from storage.run_inputs import get_run_input
         from storage.stages import get_stage
 
         db_path = app.config["SP_DB_PATH"]
         limit_raw = (request.args.get("limit") or "").strip()
+        offset_raw = (request.args.get("offset") or "").strip()
         limit = 100
         if limit_raw:
             try:
@@ -584,6 +873,13 @@ def create_app(config_overrides: dict[str, Any] | None = None) -> Flask:
             except ValueError:
                 limit = 100
         limit = max(1, min(limit, 1000))
+        offset = 0
+        if offset_raw:
+            try:
+                offset = int(offset_raw)
+            except ValueError:
+                offset = 0
+        offset = max(0, offset)
         variant_id = (request.args.get("variant_id") or "").strip() or None
 
         try:
@@ -623,6 +919,10 @@ def create_app(config_overrides: dict[str, Any] | None = None) -> Flask:
                         "run_id": run_id,
                         "stage": stage or None,
                         "pre_annotations": [],
+                        "limit": limit,
+                        "offset": offset,
+                        "total_count": 0,
+                        "variant_id": variant_id,
                     },
                 }
             )
@@ -632,8 +932,10 @@ def create_app(config_overrides: dict[str, Any] | None = None) -> Flask:
                 db_path,
                 run_id,
                 limit=limit,
+                offset=offset,
                 variant_id=variant_id,
             )
+            total_count = count_pre_annotations_for_run_public(db_path, run_id, variant_id=variant_id)
         except Exception:
             app.logger.exception("Failed to fetch pre-annotations for run_id=%s", run_id)
             return (
@@ -649,7 +951,170 @@ def create_app(config_overrides: dict[str, Any] | None = None) -> Flask:
                 500,
             )
 
-        return jsonify({"ok": True, "data": {"run_id": run_id, "stage": stage or None, "pre_annotations": rows}})
+        return jsonify(
+            {
+                "ok": True,
+                "data": {
+                    "run_id": run_id,
+                    "stage": stage or None,
+                    "pre_annotations": rows,
+                    "limit": limit,
+                    "offset": offset,
+                    "total_count": total_count,
+                    "variant_id": variant_id,
+                },
+            }
+        )
+
+    @app.get("/api/v1/runs/<run_id>/variant_summaries")
+    def get_run_variant_summaries(run_id: str):
+        from storage.run_inputs import get_run_input
+        from storage.runs import get_run as get_run_record
+        from storage.stages import get_stage, list_pipeline_stages
+        from storage.variant_summaries import (
+            count_variant_summaries_for_run,
+            list_variant_summaries_for_run,
+        )
+
+        db_path = app.config["SP_DB_PATH"]
+        limit_raw = (request.args.get("limit") or "").strip()
+        offset_raw = (request.args.get("offset") or "").strip()
+        completeness_raw = (request.args.get("completeness") or "").strip().lower()
+        completeness = (
+            completeness_raw
+            if completeness_raw in {"complete", "partial", "unavailable", "failed"}
+            else None
+        )
+        limit = 100
+        if limit_raw:
+            try:
+                limit = int(limit_raw)
+            except ValueError:
+                limit = 100
+        limit = max(1, min(limit, 1000))
+        offset = 0
+        if offset_raw:
+            try:
+                offset = int(offset_raw)
+            except ValueError:
+                offset = 0
+        offset = max(0, offset)
+
+        try:
+            run = get_run_record(db_path, run_id)
+        except Exception:
+            app.logger.exception("Failed to fetch run record for variant summary listing")
+            return (
+                jsonify(
+                    {
+                        "ok": False,
+                        "error": {"code": "RUN_FETCH_FAILED", "message": "Failed to fetch run record."},
+                    }
+                ),
+                500,
+            )
+
+        if not run:
+            return (
+                jsonify({"ok": False, "error": {"code": "RUN_NOT_FOUND", "message": "Run not found."}}),
+                404,
+            )
+
+        run_input = get_run_input(db_path, run_id)
+        latest_uploaded_at = run_input.get("uploaded_at") if run_input else None
+        stage = get_stage(db_path, run_id, "parser") or {}
+
+        stage_same_input = (
+            bool(latest_uploaded_at)
+            and stage.get("status") == "succeeded"
+            and stage.get("input_uploaded_at") == latest_uploaded_at
+        )
+        if not stage_same_input:
+            return jsonify(
+                {
+                    "ok": True,
+                    "data": {
+                        "run_id": run_id,
+                        "stage": stage or None,
+                        "variant_summaries": [],
+                        "limit": limit,
+                        "offset": offset,
+                        "total_count": 0,
+                    },
+                }
+            )
+
+        stage_statuses: dict[str, str] | None = None
+        annotation_evidence_completeness = None
+        if completeness:
+            stages = list_pipeline_stages(db_path, run_id)
+            stage_statuses = {
+                stage.get("stage_name"): stage.get("status") or ""
+                for stage in stages
+                if stage.get("stage_name")
+            }
+            annotation_stage = next(
+                (entry for entry in stages if entry.get("stage_name") == "annotation"),
+                {},
+            )
+            annotation_stats = annotation_stage.get("stats")
+            if isinstance(annotation_stats, dict):
+                annotation_evidence_completeness = annotation_stats.get(
+                    "annotation_evidence_completeness"
+                )
+
+        try:
+            list_kwargs = {"limit": limit, "offset": offset}
+            count_kwargs: dict[str, object] = {}
+            if completeness:
+                list_kwargs.update(
+                    {
+                        "completeness": completeness,
+                        "stage_statuses": stage_statuses,
+                        "annotation_evidence_completeness": annotation_evidence_completeness,
+                    }
+                )
+                count_kwargs.update(
+                    {
+                        "completeness": completeness,
+                        "stage_statuses": stage_statuses,
+                        "annotation_evidence_completeness": annotation_evidence_completeness,
+                    }
+                )
+
+            rows = list_variant_summaries_for_run(db_path, run_id, **list_kwargs)
+            total_count = count_variant_summaries_for_run(db_path, run_id, **count_kwargs)
+        except Exception:
+            app.logger.exception("Failed to fetch variant summaries for run_id=%s", run_id)
+            return (
+                jsonify(
+                    {
+                        "ok": False,
+                        "error": {
+                            "code": "VARIANT_SUMMARY_FETCH_FAILED",
+                            "message": "Failed to fetch variant summaries.",
+                        },
+                    }
+                ),
+                500,
+            )
+
+        return jsonify(
+            {
+                "ok": True,
+                "data": {
+                    "run_id": run_id,
+                    "stage": stage or None,
+                    "variant_summaries": rows,
+                    "limit": limit,
+                    "offset": offset,
+                    "total_count": total_count,
+                },
+            }
+        )
+
+    VALID_EVIDENCE_CLASSIFICATIONS = {"missense"}
+    VALID_EVIDENCE_OUTCOMES = {"found", "not_found", "error", "all"}
 
     @app.get("/api/v1/runs/<run_id>/dbsnp_evidence")
     def get_run_dbsnp_evidence(run_id: str):
@@ -668,6 +1133,44 @@ def create_app(config_overrides: dict[str, Any] | None = None) -> Flask:
                 limit = 100
         limit = max(1, min(limit, 1000))
         variant_id = (request.args.get("variant_id") or "").strip() or None
+        classification_raw = (request.args.get("classification") or "").strip().lower()
+        outcome_raw = (request.args.get("outcome") or "").strip().lower()
+        if classification_raw and classification_raw not in VALID_EVIDENCE_CLASSIFICATIONS:
+            return (
+                jsonify(
+                    {
+                        "ok": False,
+                        "error": {
+                            "code": "EVIDENCE_CLASSIFICATION_INVALID",
+                            "message": "Invalid classification filter.",
+                            "details": {
+                                "classification": classification_raw,
+                                "allowed_values": sorted(VALID_EVIDENCE_CLASSIFICATIONS),
+                            },
+                        },
+                    }
+                ),
+                400,
+            )
+        if outcome_raw and outcome_raw not in VALID_EVIDENCE_OUTCOMES:
+            return (
+                jsonify(
+                    {
+                        "ok": False,
+                        "error": {
+                            "code": "EVIDENCE_OUTCOME_INVALID",
+                            "message": "Invalid evidence outcome filter.",
+                            "details": {
+                                "outcome": outcome_raw,
+                                "allowed_values": sorted(VALID_EVIDENCE_OUTCOMES),
+                            },
+                        },
+                    }
+                ),
+                400,
+            )
+        classification = classification_raw or "missense"
+        outcome = outcome_raw or None
 
         try:
             run = get_run_record(db_path, run_id)
@@ -715,6 +1218,8 @@ def create_app(config_overrides: dict[str, Any] | None = None) -> Flask:
                 db_path,
                 run_id,
                 variant_id=variant_id,
+                classification=classification,
+                outcome=outcome,
                 limit=limit,
             )
         except Exception:
@@ -751,6 +1256,44 @@ def create_app(config_overrides: dict[str, Any] | None = None) -> Flask:
                 limit = 100
         limit = max(1, min(limit, 1000))
         variant_id = (request.args.get("variant_id") or "").strip() or None
+        classification_raw = (request.args.get("classification") or "").strip().lower()
+        outcome_raw = (request.args.get("outcome") or "").strip().lower()
+        if classification_raw and classification_raw not in VALID_EVIDENCE_CLASSIFICATIONS:
+            return (
+                jsonify(
+                    {
+                        "ok": False,
+                        "error": {
+                            "code": "EVIDENCE_CLASSIFICATION_INVALID",
+                            "message": "Invalid classification filter.",
+                            "details": {
+                                "classification": classification_raw,
+                                "allowed_values": sorted(VALID_EVIDENCE_CLASSIFICATIONS),
+                            },
+                        },
+                    }
+                ),
+                400,
+            )
+        if outcome_raw and outcome_raw not in VALID_EVIDENCE_OUTCOMES:
+            return (
+                jsonify(
+                    {
+                        "ok": False,
+                        "error": {
+                            "code": "EVIDENCE_OUTCOME_INVALID",
+                            "message": "Invalid evidence outcome filter.",
+                            "details": {
+                                "outcome": outcome_raw,
+                                "allowed_values": sorted(VALID_EVIDENCE_OUTCOMES),
+                            },
+                        },
+                    }
+                ),
+                400,
+            )
+        classification = classification_raw or "missense"
+        outcome = outcome_raw or None
 
         try:
             run = get_run_record(db_path, run_id)
@@ -798,6 +1341,8 @@ def create_app(config_overrides: dict[str, Any] | None = None) -> Flask:
                 db_path,
                 run_id,
                 variant_id=variant_id,
+                classification=classification,
+                outcome=outcome,
                 limit=limit,
             )
         except Exception:
@@ -834,6 +1379,44 @@ def create_app(config_overrides: dict[str, Any] | None = None) -> Flask:
                 limit = 100
         limit = max(1, min(limit, 1000))
         variant_id = (request.args.get("variant_id") or "").strip() or None
+        classification_raw = (request.args.get("classification") or "").strip().lower()
+        outcome_raw = (request.args.get("outcome") or "").strip().lower()
+        if classification_raw and classification_raw not in VALID_EVIDENCE_CLASSIFICATIONS:
+            return (
+                jsonify(
+                    {
+                        "ok": False,
+                        "error": {
+                            "code": "EVIDENCE_CLASSIFICATION_INVALID",
+                            "message": "Invalid classification filter.",
+                            "details": {
+                                "classification": classification_raw,
+                                "allowed_values": sorted(VALID_EVIDENCE_CLASSIFICATIONS),
+                            },
+                        },
+                    }
+                ),
+                400,
+            )
+        if outcome_raw and outcome_raw not in VALID_EVIDENCE_OUTCOMES:
+            return (
+                jsonify(
+                    {
+                        "ok": False,
+                        "error": {
+                            "code": "EVIDENCE_OUTCOME_INVALID",
+                            "message": "Invalid evidence outcome filter.",
+                            "details": {
+                                "outcome": outcome_raw,
+                                "allowed_values": sorted(VALID_EVIDENCE_OUTCOMES),
+                            },
+                        },
+                    }
+                ),
+                400,
+            )
+        classification = classification_raw or "missense"
+        outcome = outcome_raw or None
 
         try:
             run = get_run_record(db_path, run_id)
@@ -881,6 +1464,8 @@ def create_app(config_overrides: dict[str, Any] | None = None) -> Flask:
                 db_path,
                 run_id,
                 variant_id=variant_id,
+                classification=classification,
+                outcome=outcome,
                 limit=limit,
             )
         except Exception:
@@ -909,6 +1494,8 @@ def create_app(config_overrides: dict[str, Any] | None = None) -> Flask:
 
         db_path = app.config["SP_DB_PATH"]
         limit_raw = (request.args.get("limit") or "").strip()
+        offset_raw = (request.args.get("offset") or "").strip()
+        pos_raw = (request.args.get("pos") or "").strip()
         limit = 300
         if limit_raw:
             try:
@@ -916,6 +1503,30 @@ def create_app(config_overrides: dict[str, Any] | None = None) -> Flask:
             except ValueError:
                 limit = 300
         limit = max(1, min(limit, 5000))
+        offset = 0
+        if offset_raw:
+            try:
+                offset = int(offset_raw)
+            except ValueError:
+                offset = 0
+        offset = max(0, offset)
+        pos_filter = None
+        if pos_raw:
+            try:
+                pos_filter = int(pos_raw)
+            except ValueError:
+                return (
+                    jsonify(
+                        {
+                            "ok": False,
+                            "error": {
+                                "code": "ANNOTATION_OUTPUT_POS_INVALID",
+                                "message": "Position filter must be an integer.",
+                            },
+                        }
+                    ),
+                    400,
+                )
 
         try:
             run = get_run_record(db_path, run_id)
@@ -994,13 +1605,56 @@ def create_app(config_overrides: dict[str, Any] | None = None) -> Flask:
 
         preview_lines: list[str] = []
         truncated = False
+        data_line_count = 0
+        header_line = None
+        pos_text = str(pos_filter) if pos_filter is not None else None
         try:
             with open(output_vcf_path, "r", encoding="utf-8", errors="replace") as f:
-                for idx, line in enumerate(f):
-                    if idx >= limit:
-                        truncated = True
+                data_seen = 0
+                for line in f:
+                    stripped = line.rstrip("\r\n")
+                    if stripped.startswith("#CHROM"):
+                        header_line = stripped
+                        continue
+                    if stripped.startswith("#") or not stripped:
+                        continue
+
+                    if pos_text is not None:
+                        cols = stripped.split("\t")
+                        if len(cols) > 1 and cols[1] == pos_text:
+                            if header_line and not preview_lines:
+                                preview_lines.append(header_line)
+                            preview_lines.append(stripped)
+                            data_line_count += 1
+                            if data_line_count >= limit:
+                                for tail in f:
+                                    tail_stripped = tail.rstrip("\r\n")
+                                    if tail_stripped.startswith("#") or not tail_stripped:
+                                        continue
+                                    tail_cols = tail_stripped.split("\t")
+                                    if len(tail_cols) > 1 and tail_cols[1] == pos_text:
+                                        truncated = True
+                                        break
+                                break
+                        continue
+
+                    if data_seen < offset:
+                        data_seen += 1
+                        continue
+
+                    if header_line and not preview_lines:
+                        preview_lines.append(header_line)
+                    preview_lines.append(stripped)
+                    data_line_count += 1
+                    data_seen += 1
+                    if data_line_count >= limit:
+                        for tail in f:
+                            tail_stripped = tail.rstrip("\r\n")
+                            if tail_stripped.startswith("#") or not tail_stripped:
+                                continue
+                            truncated = True
+                            break
                         break
-                    preview_lines.append(line.rstrip("\r\n"))
         except Exception:
             app.logger.exception(
                 "Failed to read annotation output preview for run_id=%s path=%s",
@@ -1029,7 +1683,419 @@ def create_app(config_overrides: dict[str, Any] | None = None) -> Flask:
                     "output_vcf_path": output_vcf_path,
                     "preview_lines": preview_lines,
                     "preview_line_count": len(preview_lines),
+                    "data_line_count": data_line_count,
+                    "offset": 0 if pos_text is not None else offset,
+                    "pos_filter": pos_filter,
                     "truncated": truncated,
+                },
+            }
+        )
+
+    _BATCH_ARTIFACT_MAP = {
+        "classification.input.vcf": "classification.input.batch*.vcf",
+        "classification.vep.jsonl": "classification.vep.batch*.jsonl",
+    }
+
+    def _batch_artifact_candidates(artifacts_dir: str, name: str) -> list[str]:
+        pattern = _BATCH_ARTIFACT_MAP.get(name)
+        if not pattern:
+            return []
+        return sorted(glob.glob(os.path.join(artifacts_dir, pattern)))
+
+    ARTIFACT_CATALOG = [
+        {"name": "classification.input.vcf", "kind": "vcf", "stage": "classification"},
+        {"name": "classification.vep.jsonl", "kind": "jsonl", "stage": "classification"},
+        {"name": "prediction.input.vcf", "kind": "vcf", "stage": "prediction"},
+        {"name": "prediction.vep.jsonl", "kind": "jsonl", "stage": "prediction"},
+        {"name": "snpeff.annotated.vcf", "kind": "vcf", "stage": "annotation"},
+    ]
+
+    @app.get("/api/v1/runs/<run_id>/artifacts")
+    def list_run_artifacts(run_id: str):
+        from storage.run_artifacts import run_artifacts_dir
+        from storage.runs import get_run as get_run_record
+
+        db_path = app.config["SP_DB_PATH"]
+
+        try:
+            run = get_run_record(db_path, run_id)
+        except Exception:
+            app.logger.exception("Failed to fetch run record for artifact listing")
+            return (
+                jsonify(
+                    {
+                        "ok": False,
+                        "error": {"code": "RUN_FETCH_FAILED", "message": "Failed to fetch run record."},
+                    }
+                ),
+                500,
+            )
+
+        if not run:
+            return (
+                jsonify({"ok": False, "error": {"code": "RUN_NOT_FOUND", "message": "Run not found."}}),
+                404,
+            )
+
+        artifacts_dir = os.path.abspath(run_artifacts_dir(db_path, run_id))
+        catalog = []
+        for entry in ARTIFACT_CATALOG:
+            stage_ready = _stage_ready_for_latest_upload(db_path, run_id, entry["stage"])
+            artifact_path = os.path.abspath(os.path.join(artifacts_dir, entry["name"]))
+            exists = stage_ready and os.path.isfile(artifact_path)
+            if stage_ready and not exists:
+                exists = bool(_batch_artifact_candidates(artifacts_dir, entry["name"]))
+            reason = None
+            if not stage_ready:
+                reason = "stage_not_ready"
+            elif not exists:
+                reason = "not_found"
+            catalog.append(
+                {
+                    "name": entry["name"],
+                    "kind": entry["kind"],
+                    "stage": entry["stage"],
+                    "available": exists,
+                    "reason": reason,
+                }
+            )
+
+        html_stage_ready = _stage_ready_for_latest_upload(db_path, run_id, "reporting")
+        html_items = []
+        if os.path.isdir(artifacts_dir):
+            for name in sorted(os.listdir(artifacts_dir)):
+                if not name.lower().endswith(".html"):
+                    continue
+                artifact_path = os.path.abspath(os.path.join(artifacts_dir, name))
+                exists = html_stage_ready and os.path.isfile(artifact_path)
+                reason = None
+                if not html_stage_ready:
+                    reason = "stage_not_ready"
+                elif not os.path.isfile(artifact_path):
+                    reason = "not_found"
+                html_items.append(
+                    {
+                        "name": name,
+                        "kind": "html",
+                        "stage": "reporting",
+                        "available": exists,
+                        "reason": reason,
+                    }
+                )
+
+        return jsonify({"ok": True, "data": {"run_id": run_id, "artifacts": catalog + html_items}})
+
+    @app.get("/api/v1/runs/<run_id>/artifacts/preview")
+    def get_run_artifact_preview(run_id: str):
+        from storage.run_artifacts import run_artifacts_dir
+        from storage.runs import get_run as get_run_record
+
+        name = (request.args.get("name") or "").strip()
+        limit_raw = (request.args.get("limit") or "").strip()
+        offset_raw = (request.args.get("offset") or "").strip()
+        pos_raw = (request.args.get("pos") or "").strip()
+        limit = 200
+        if limit_raw:
+            try:
+                limit = int(limit_raw)
+            except ValueError:
+                limit = 200
+        limit = max(1, min(limit, 5000))
+        offset = 0
+        if offset_raw:
+            try:
+                offset = int(offset_raw)
+            except ValueError:
+                offset = 0
+        offset = max(0, offset)
+        pos_filter = None
+        if pos_raw:
+            try:
+                pos_filter = int(pos_raw)
+            except ValueError:
+                return (
+                    jsonify(
+                        {
+                            "ok": False,
+                            "error": {
+                                "code": "ARTIFACT_POS_INVALID",
+                                "message": "Position filter must be an integer.",
+                            },
+                        }
+                    ),
+                    400,
+                )
+
+        if not name:
+            return (
+                jsonify(
+                    {
+                        "ok": False,
+                        "error": {"code": "ARTIFACT_NAME_REQUIRED", "message": "Artifact name is required."},
+                    }
+                ),
+                400,
+            )
+
+        db_path = app.config["SP_DB_PATH"]
+        try:
+            run = get_run_record(db_path, run_id)
+        except Exception:
+            app.logger.exception("Failed to fetch run record for artifact preview")
+            return (
+                jsonify(
+                    {
+                        "ok": False,
+                        "error": {"code": "RUN_FETCH_FAILED", "message": "Failed to fetch run record."},
+                    }
+                ),
+                500,
+            )
+
+        if not run:
+            return (
+                jsonify({"ok": False, "error": {"code": "RUN_NOT_FOUND", "message": "Run not found."}}),
+                404,
+            )
+
+        entry = next((item for item in ARTIFACT_CATALOG if item["name"] == name), None)
+        kind = None
+        stage = None
+        if entry:
+            kind = entry["kind"]
+            stage = entry["stage"]
+        elif name.lower().endswith(".html"):
+            kind = "html"
+            stage = "reporting"
+        else:
+            return (
+                jsonify({"ok": False, "error": {"code": "ARTIFACT_UNKNOWN", "message": "Artifact not supported."}}),
+                404,
+            )
+
+        if not _stage_ready_for_latest_upload(db_path, run_id, stage):
+            return jsonify(
+                {
+                    "ok": True,
+                    "data": {
+                        "run_id": run_id,
+                        "artifact": {
+                            "name": name,
+                            "kind": kind,
+                            "available": False,
+                            "reason": "stage_not_ready",
+                        },
+                    },
+                }
+            )
+
+        artifacts_dir = os.path.abspath(run_artifacts_dir(db_path, run_id))
+        artifact_path = os.path.abspath(os.path.join(artifacts_dir, name))
+        if not os.path.isfile(artifact_path):
+            batch_candidates = _batch_artifact_candidates(artifacts_dir, name)
+            if batch_candidates:
+                artifact_path = os.path.abspath(batch_candidates[0])
+        try:
+            in_artifacts = os.path.commonpath([artifact_path, artifacts_dir]) == artifacts_dir
+        except ValueError:
+            in_artifacts = False
+        if not in_artifacts:
+            return (
+                jsonify(
+                    {
+                        "ok": False,
+                        "error": {"code": "ARTIFACT_INVALID_PATH", "message": "Invalid artifact path."},
+                    }
+                ),
+                400,
+            )
+
+        if not os.path.isfile(artifact_path):
+            return jsonify(
+                {
+                    "ok": True,
+                    "data": {
+                        "run_id": run_id,
+                        "artifact": {
+                            "name": name,
+                            "kind": kind,
+                            "available": False,
+                            "reason": "not_found",
+                        },
+                    },
+                }
+            )
+
+        if kind == "vcf":
+            preview_lines = []
+            truncated = False
+            data_line_count = 0
+            header_line = None
+            pos_text = str(pos_filter) if pos_filter is not None else None
+            try:
+                with open(artifact_path, "r", encoding="utf-8", errors="replace") as handle:
+                    data_seen = 0
+                    for line in handle:
+                        stripped = line.rstrip("\r\n")
+                        if stripped.startswith("#CHROM"):
+                            header_line = stripped
+                            continue
+                        if stripped.startswith("#") or not stripped:
+                            continue
+
+                        if pos_text is not None:
+                            cols = stripped.split("\t")
+                            if len(cols) > 1 and cols[1] == pos_text:
+                                if header_line and not preview_lines:
+                                    preview_lines.append(header_line)
+                                preview_lines.append(stripped)
+                                data_line_count += 1
+                                if data_line_count >= limit:
+                                    for tail in handle:
+                                        tail_stripped = tail.rstrip("\r\n")
+                                        if tail_stripped.startswith("#") or not tail_stripped:
+                                            continue
+                                        tail_cols = tail_stripped.split("\t")
+                                        if len(tail_cols) > 1 and tail_cols[1] == pos_text:
+                                            truncated = True
+                                            break
+                                    break
+                            continue
+
+                        if data_seen < offset:
+                            data_seen += 1
+                            continue
+
+                        if header_line and not preview_lines:
+                            preview_lines.append(header_line)
+                        preview_lines.append(stripped)
+                        data_line_count += 1
+                        data_seen += 1
+                        if data_line_count >= limit:
+                            for tail in handle:
+                                tail_stripped = tail.rstrip("\r\n")
+                                if tail_stripped.startswith("#") or not tail_stripped:
+                                    continue
+                                truncated = True
+                                break
+                            break
+            except Exception:
+                app.logger.exception("Failed to read VCF artifact preview for run_id=%s", run_id)
+                return (
+                    jsonify(
+                        {
+                            "ok": False,
+                            "error": {
+                                "code": "ARTIFACT_READ_FAILED",
+                                "message": "Failed to read artifact preview.",
+                            },
+                        }
+                    ),
+                    500,
+                )
+            return jsonify(
+                {
+                    "ok": True,
+                    "data": {
+                        "run_id": run_id,
+                        "artifact": {
+                            "name": name,
+                            "kind": kind,
+                            "available": True,
+                            "preview_lines": preview_lines,
+                            "preview_line_count": len(preview_lines),
+                            "data_line_count": data_line_count,
+                            "offset": 0 if pos_text is not None else offset,
+                            "pos_filter": pos_filter,
+                            "truncated": truncated,
+                        },
+                    },
+                }
+            )
+
+        if kind == "jsonl":
+            rows = []
+            truncated = False
+            try:
+                with open(artifact_path, "r", encoding="utf-8", errors="replace") as handle:
+                    for idx, line in enumerate(handle):
+                        if idx >= limit:
+                            truncated = True
+                            break
+                        raw_line = line.strip()
+                        if not raw_line:
+                            continue
+                        try:
+                            rows.append(json.loads(raw_line))
+                        except json.JSONDecodeError:
+                            rows.append({"_raw": raw_line})
+            except Exception:
+                app.logger.exception("Failed to read JSONL artifact preview for run_id=%s", run_id)
+                return (
+                    jsonify(
+                        {
+                            "ok": False,
+                            "error": {
+                                "code": "ARTIFACT_READ_FAILED",
+                                "message": "Failed to read artifact preview.",
+                            },
+                        }
+                    ),
+                    500,
+                )
+            return jsonify(
+                {
+                    "ok": True,
+                    "data": {
+                        "run_id": run_id,
+                        "artifact": {
+                            "name": name,
+                            "kind": kind,
+                            "available": True,
+                            "rows": rows,
+                            "row_count": len(rows),
+                            "truncated": truncated,
+                        },
+                    },
+                }
+            )
+
+        # html
+        html_truncated = False
+        html_text = ""
+        max_bytes = 500000
+        try:
+            with open(artifact_path, "r", encoding="utf-8", errors="replace") as handle:
+                html_text = handle.read(max_bytes + 1)
+            if len(html_text) > max_bytes:
+                html_text = html_text[:max_bytes]
+                html_truncated = True
+        except Exception:
+            app.logger.exception("Failed to read HTML artifact preview for run_id=%s", run_id)
+            return (
+                jsonify(
+                    {
+                        "ok": False,
+                        "error": {
+                            "code": "ARTIFACT_READ_FAILED",
+                            "message": "Failed to read artifact preview.",
+                        },
+                    }
+                ),
+                500,
+            )
+        return jsonify(
+            {
+                "ok": True,
+                "data": {
+                    "run_id": run_id,
+                    "artifact": {
+                        "name": name,
+                        "kind": kind,
+                        "available": True,
+                        "html": html_text,
+                        "truncated": html_truncated,
+                    },
                 },
             }
         )
@@ -1062,7 +2128,21 @@ def create_app(config_overrides: dict[str, Any] | None = None) -> Flask:
                 404,
             )
 
-        def _snapshot_events() -> tuple[list[str], dict[str, str]]:
+        def _variant_result_count(stats: dict | None) -> int | None:
+            if not isinstance(stats, dict):
+                return None
+            for key in (
+                "variants_written",
+                "variants_processed",
+                "pre_annotations_persisted",
+                "snv_records_persisted",
+            ):
+                value = stats.get(key)
+                if isinstance(value, int):
+                    return value
+            return None
+
+        def _snapshot_events() -> tuple[list[str], dict[str, str], dict[str, int | None]]:
             event_at = now_iso8601()
             run_payload = SseEnvelope(
                 run_id=run_id,
@@ -1074,9 +2154,11 @@ def create_app(config_overrides: dict[str, Any] | None = None) -> Flask:
             stages = list_pipeline_stages(db_path, run_id)
             by_name = {s.get("stage_name"): s for s in stages}
             stage_status_by_name: dict[str, str] = {}
+            output_count_by_name: dict[str, int | None] = {}
             for stage_name in PIPELINE_STAGE_ORDER:
                 stage = by_name.get(stage_name) or {"stage_name": stage_name, "status": "queued"}
                 stage_status_by_name[stage_name] = stage.get("status") or "queued"
+                output_count_by_name[stage_name] = _variant_result_count(stage.get("stats"))
                 stage_payload = SseEnvelope(
                     run_id=run_id,
                     event_at=event_at,
@@ -1084,18 +2166,19 @@ def create_app(config_overrides: dict[str, Any] | None = None) -> Flask:
                 ).to_dict()
                 messages.append(format_sse_event("stage_status", stage_payload))
 
-            return messages, stage_status_by_name
+            return messages, stage_status_by_name, output_count_by_name
 
         def _event_stream():
             import sqlite3
 
             yield format_sse_retry(2000)
-            snapshot_messages, stage_status_by_name = _snapshot_events()
+            snapshot_messages, stage_status_by_name, output_count_by_name = _snapshot_events()
             for msg in snapshot_messages:
                 yield msg
 
             last_run_status = run.get("status")
             last_stage_status_by_name: dict[str, str] = dict(stage_status_by_name)
+            last_output_count_by_name: dict[str, int | None] = dict(output_count_by_name)
             last_heartbeat_at = time.time()
 
             poll_seconds = 0.5
@@ -1123,6 +2206,21 @@ def create_app(config_overrides: dict[str, Any] | None = None) -> Flask:
                         if not name:
                             continue
                         status = stage.get("status") or "queued"
+                        stats_count = _variant_result_count(stage.get("stats"))
+                        emitted_variant_result = False
+                        if stats_count is not None and stats_count != last_output_count_by_name.get(name):
+                            last_output_count_by_name[name] = stats_count
+                            result_payload = SseEnvelope(
+                                run_id=run_id,
+                                event_at=now_iso8601(),
+                                data={
+                                    "stage_name": name,
+                                    "status": status,
+                                    "variants_written": stats_count,
+                                },
+                            ).to_dict()
+                            yield format_sse_event("variant_result", result_payload)
+                            emitted_variant_result = True
                         if last_stage_status_by_name.get(name) != status:
                             last_stage_status_by_name[name] = status
                             payload = SseEnvelope(
@@ -1131,6 +2229,17 @@ def create_app(config_overrides: dict[str, Any] | None = None) -> Flask:
                                 data=stage,
                             ).to_dict()
                             yield format_sse_event("stage_status", payload)
+
+                            if status in {"succeeded", "failed"} and not emitted_variant_result:
+                                result_data = {"stage_name": name, "status": status}
+                                if stats_count is not None:
+                                    result_data["variants_written"] = stats_count
+                                result_payload = SseEnvelope(
+                                    run_id=run_id,
+                                    event_at=now_iso8601(),
+                                    data=result_data,
+                                ).to_dict()
+                                yield format_sse_event("variant_result", result_payload)
 
                     now = time.time()
                     if now - last_heartbeat_at >= heartbeat_seconds:
@@ -1162,7 +2271,6 @@ def create_app(config_overrides: dict[str, Any] | None = None) -> Flask:
             RunNotFoundError,
             RunNotStartableError,
             claim_run_for_execution,
-            set_run_status_if_not_canceled,
         )
 
         db_path = app.config["SP_DB_PATH"]
@@ -1182,10 +2290,7 @@ def create_app(config_overrides: dict[str, Any] | None = None) -> Flask:
                 {
                     "ok": True,
                     "data": {
-                        "run_id": run_id,
-                        "status": run.get("status"),
-                        "reference_build": run.get("reference_build"),
-                        "annotation_evidence_policy": run.get("annotation_evidence_policy"),
+                        **_serialize_run_for_response(run, run_id=run_id),
                         "started_stage": None,
                     },
                 }
@@ -1244,13 +2349,25 @@ def create_app(config_overrides: dict[str, Any] | None = None) -> Flask:
                 500,
             )
 
+        run_logger = _build_run_logger(run_id)
+        from run_logging import close_run_logger, log_run_event
+
+        log_run_event(
+            run_logger,
+            "run_start",
+            "Run started.",
+            stage_name=started_stage,
+            status="running",
+        )
+
         def _background_execute():
+            unexpected_error = False
             try:
                 run_pipeline(
                     db_path,
                     run_id,
                     max_decompressed_bytes=app.config["SP_MAX_VCF_DECOMPRESSED_BYTES"],
-                    logger=app.logger,
+                    logger=run_logger,
                     prediction_config=app.config.get("SP_TEST_PREDICTION_CONFIG"),
                 )
             except OrchestratorError as exc:
@@ -1262,12 +2379,23 @@ def create_app(config_overrides: dict[str, Any] | None = None) -> Flask:
                     exc.details,
                 )
             except Exception:
+                unexpected_error = True
                 app.logger.exception("Pipeline orchestration crashed for run_id=%s", run_id)
             finally:
                 try:
-                    set_run_status_if_not_canceled(db_path, run_id, "queued")
-                except Exception:
-                    app.logger.exception("Failed to reset run status for run_id=%s", run_id)
+                    final_status = _determine_final_status_for_logging(
+                        db_path,
+                        run_id,
+                        force_failed=unexpected_error,
+                    )
+                    log_run_event(
+                        run_logger,
+                        "run_finalize",
+                        "Run finalized.",
+                        status=final_status,
+                    )
+                    _finalize_run_status(db_path, run_id, force_failed=unexpected_error)
+                    close_run_logger(run_logger)
                 finally:
                     try:
                         from pipeline.cancel_signals import clear_run_cancel_request
@@ -1282,10 +2410,7 @@ def create_app(config_overrides: dict[str, Any] | None = None) -> Flask:
             {
                 "ok": True,
                 "data": {
-                    "run_id": run_id,
-                    "status": "running",
-                    "reference_build": run.get("reference_build"),
-                    "annotation_evidence_policy": run.get("annotation_evidence_policy"),
+                    **_serialize_run_for_response(run, run_id=run_id, status_override="running"),
                     "started_stage": started_stage,
                 },
             }
@@ -1532,21 +2657,32 @@ def create_app(config_overrides: dict[str, Any] | None = None) -> Flask:
                         "stage_name": normalized_stage,
                         "preserved_stages": preserved_stages,
                         "reset_stages": reset_stages,
-                        "status": run.get("status"),
-                        "reference_build": run.get("reference_build"),
-                        "annotation_evidence_policy": run.get("annotation_evidence_policy"),
+                        **_serialize_run_for_response(run, run_id=run_id),
                         "started_stage": None,
                     },
                 }
             )
 
+        run_logger = _build_run_logger(run_id)
+        from run_logging import close_run_logger, log_run_event
+
+        log_run_event(
+            run_logger,
+            "run_start",
+            "Run retry started.",
+            stage_name=normalized_stage,
+            status="running",
+            details={"retry_stage": normalized_stage},
+        )
+
         def _background_execute():
+            unexpected_error = False
             try:
                 run_pipeline(
                     db_path,
                     run_id,
                     max_decompressed_bytes=app.config["SP_MAX_VCF_DECOMPRESSED_BYTES"],
-                    logger=app.logger,
+                    logger=run_logger,
                     prediction_config=app.config.get("SP_TEST_PREDICTION_CONFIG"),
                 )
             except OrchestratorError as exc:
@@ -1558,12 +2694,23 @@ def create_app(config_overrides: dict[str, Any] | None = None) -> Flask:
                     exc.details,
                 )
             except Exception:
+                unexpected_error = True
                 app.logger.exception("Pipeline orchestration crashed for run_id=%s", run_id)
             finally:
                 try:
-                    set_run_status_if_not_canceled(db_path, run_id, "queued")
-                except Exception:
-                    app.logger.exception("Failed to reset run status for run_id=%s", run_id)
+                    final_status = _determine_final_status_for_logging(
+                        db_path,
+                        run_id,
+                        force_failed=unexpected_error,
+                    )
+                    log_run_event(
+                        run_logger,
+                        "run_finalize",
+                        "Run finalized.",
+                        status=final_status,
+                    )
+                    _finalize_run_status(db_path, run_id, force_failed=unexpected_error)
+                    close_run_logger(run_logger)
                 finally:
                     try:
                         from pipeline.cancel_signals import clear_run_cancel_request
@@ -1582,9 +2729,7 @@ def create_app(config_overrides: dict[str, Any] | None = None) -> Flask:
                     "stage_name": normalized_stage,
                     "preserved_stages": preserved_stages,
                     "reset_stages": reset_stages,
-                    "status": "running",
-                    "reference_build": run.get("reference_build"),
-                    "annotation_evidence_policy": run.get("annotation_evidence_policy"),
+                    **_serialize_run_for_response(run, run_id=run_id, status_override="running"),
                     "started_stage": started_stage,
                 },
             }
@@ -1643,6 +2788,11 @@ def create_app(config_overrides: dict[str, Any] | None = None) -> Flask:
                 ),
                 500,
             )
+
+        run_logger = _build_run_logger(run_id)
+        from run_logging import log_run_event
+
+        log_run_event(run_logger, "run_cancel", "Run canceled.", status="canceled")
 
         return jsonify({"ok": True, "data": record})
 

@@ -157,6 +157,58 @@ class VcfUploadApiTestCase(unittest.TestCase):
                 conn.close()
             self.assertEqual(variant_count, 0)
 
+    def test_upload_vcf_resets_run_evidence_mode_decision_telemetry(self):
+        import app as sp_app  # noqa: E402
+        from storage.runs import update_run_evidence_mode_decision  # noqa: E402
+
+        vcf_a = b"#CHROM\tPOS\tREF\tALT\n1\t1\tA\tT\n"
+        vcf_b = b"#CHROM\tPOS\tREF\tALT\n1\t2\tA\tG\n"
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = os.path.join(tmpdir, "sp.db")
+            flask_app = sp_app.create_app({"TESTING": True, "SP_DB_PATH": db_path})
+            client = flask_app.test_client()
+
+            run_id = json.loads(client.post("/api/v1/runs").get_data(as_text=True))["data"]["run_id"]
+
+            first_upload = client.post(
+                f"/api/v1/runs/{run_id}/vcf",
+                data={"vcf_file": (io.BytesIO(vcf_a), "a.vcf")},
+                content_type="multipart/form-data",
+            )
+            self.assertEqual(first_upload.status_code, 200)
+
+            update_run_evidence_mode_decision(
+                db_path,
+                run_id,
+                requested_mode="offline",
+                effective_mode="offline",
+                online_available=False,
+                offline_sources_configured={"dbsnp": True, "clinvar": False, "gnomad": False},
+                decision_reason="manual_test",
+                detected_at="2026-03-10T00:00:00+00:00",
+            )
+
+            second_upload = client.post(
+                f"/api/v1/runs/{run_id}/vcf",
+                data={"vcf_file": (io.BytesIO(vcf_b), "b.vcf")},
+                content_type="multipart/form-data",
+            )
+            self.assertEqual(second_upload.status_code, 200)
+
+            run_payload = json.loads(client.get(f"/api/v1/runs/{run_id}").get_data(as_text=True))
+            self.assertTrue(run_payload.get("ok"))
+            run_data = run_payload["data"]
+            self.assertEqual(run_data.get("evidence_mode_requested"), "online")
+            self.assertIsNone(run_data.get("evidence_mode_effective"))
+            self.assertIsNone(run_data.get("evidence_online_available"))
+            self.assertEqual(
+                run_data.get("evidence_offline_sources_configured"),
+                {"dbsnp": False, "clinvar": False, "gnomad": False},
+            )
+            self.assertEqual(run_data.get("evidence_mode_decision_reason"), "not_evaluated")
+            self.assertIsNone(run_data.get("evidence_mode_detected_at"))
+
     def test_upload_vcf_rejects_while_run_is_running(self):
         import app as sp_app  # noqa: E402
 

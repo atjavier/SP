@@ -54,6 +54,19 @@ def _positive_int_env(name: str, default: int) -> int:
     return value
 
 
+def _batch_size_env(default: int) -> int:
+    raw = (os.environ.get("SP_VEP_BATCH_SIZE") or "").strip()
+    if not raw:
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        return default
+    if value < 1:
+        return 0
+    return value
+
+
 def _tail(text: str, max_chars: int = 1500) -> str:
     if not text:
         return ""
@@ -112,6 +125,7 @@ def _vep_config(overrides: dict | None = None) -> dict:
         "fasta_path": (os.environ.get("SP_VEP_FASTA_PATH") or "").strip() or None,
         "assembly": (os.environ.get("SP_VEP_ASSEMBLY") or "").strip() or "GRCh38",
         "timeout_seconds": _positive_int_env("SP_VEP_TIMEOUT_SECONDS", 1200),
+        "batch_size": _batch_size_env(20000),
         "extra_args": extra_args,
     }
 
@@ -124,6 +138,7 @@ def _vep_config(overrides: dict | None = None) -> dict:
             "fasta_path",
             "assembly",
             "timeout_seconds",
+            "batch_size",
             "extra_args",
         ):
             value = overrides.get(key)
@@ -136,6 +151,13 @@ def _vep_config(overrides: dict | None = None) -> dict:
                     continue
                 if value < 1:
                     continue
+            if key == "batch_size":
+                try:
+                    value = int(value)
+                except (TypeError, ValueError):
+                    continue
+                if value < 1:
+                    value = 0
             if key == "extra_args":
                 value = list(value) if isinstance(value, (list, tuple)) else []
             config[key] = value
@@ -195,6 +217,17 @@ def _write_minimal_vcf_fast(variants: list[dict], out_path: str) -> int:
             f.write(f"{chrom}\t{pos}\t.\t{ref}\t{alt}\t.\t.\t.\n")
             count += 1
     return count
+
+
+def _iter_batches(items, batch_size: int):
+    batch: list = []
+    for item in items:
+        batch.append(item)
+        if len(batch) >= batch_size:
+            yield batch
+            batch = []
+    if batch:
+        yield batch
 
 
 def _normalized_chrom(value: str | None) -> str:
@@ -423,179 +456,7 @@ def run_classification_stage(
                     details=config_error,
                 )
 
-            variants = list(iter_variants_for_run_with_ids(db_path, run_id, conn=conn))
             artifacts_dir = ensure_run_artifacts_dir(db_path, run_id)
-            input_vcf_path = os.path.join(artifacts_dir, "classification.input.vcf")
-            output_json_path = os.path.join(artifacts_dir, "classification.vep.jsonl")
-            variants_written = _write_minimal_vcf_fast(variants, input_vcf_path)
-
-            cmd: list[str] = [str(config["cmd"])]
-            if config.get("script_path"):
-                cmd.append(str(config["script_path"]))
-            cmd.extend(
-                [
-                    "--input_file",
-                    input_vcf_path,
-                    "--output_file",
-                    output_json_path,
-                    "--format",
-                    "vcf",
-                    "--json",
-                    "--force_overwrite",
-                    "--offline",
-                    "--cache",
-                    "--dir_cache",
-                    str(config["cache_dir"]),
-                    "--assembly",
-                    str(config["assembly"]),
-                ]
-            )
-            if config.get("plugin_dir"):
-                cmd.extend(["--dir_plugins", str(config["plugin_dir"])])
-            if config.get("fasta_path"):
-                cmd.extend(["--fasta", str(config["fasta_path"])])
-            cmd.extend(list(config.get("extra_args") or []))
-
-            stats["input_vcf_path"] = input_vcf_path
-            stats["output_json_path"] = output_json_path
-            stats["variants_processed"] = len(variants)
-            stats["variants_written"] = variants_written
-            stats["vep_cmd"] = cmd[:2] if len(cmd) >= 2 else cmd
-            stats["vep_timeout_seconds"] = int(config["timeout_seconds"])
-
-            if _get_run_status(conn, run_id) == "canceled":
-                conn.execute("BEGIN IMMEDIATE")
-                mark_stage_canceled(
-                    db_path,
-                    run_id,
-                    "classification",
-                    input_uploaded_at=uploaded_at,
-                    conn=conn,
-                    commit=False,
-                )
-                clear_classifications_for_run(db_path, run_id, conn=conn, commit=False)
-                conn.commit()
-                raise StageExecutionError(409, "RUN_CANCELED", "Run was canceled.")
-
-            try:
-                completed = subprocess.run(
-                    cmd,
-                    cwd=None,
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.PIPE,
-                    check=False,
-                    timeout=int(config["timeout_seconds"]),
-                )
-            except subprocess.TimeoutExpired as exc:
-                stderr_raw = exc.stderr
-                if isinstance(stderr_raw, bytes):
-                    stderr_text = stderr_raw.decode("utf-8", errors="replace")
-                else:
-                    stderr_text = stderr_raw or ""
-                details = {
-                    "timeout_seconds": int(config["timeout_seconds"]),
-                    "stderr_tail": _tail(stderr_text),
-                    "cmd": cmd,
-                }
-                conn.execute("BEGIN IMMEDIATE")
-                clear_classifications_for_run(db_path, run_id, conn=conn, commit=False)
-                mark_stage_failed(
-                    db_path,
-                    run_id,
-                    "classification",
-                    input_uploaded_at=uploaded_at,
-                    error_code="VEP_TIMEOUT",
-                    error_message=f"VEP timed out after {config['timeout_seconds']} seconds.",
-                    error_details=details,
-                    conn=conn,
-                    commit=False,
-                )
-                conn.commit()
-                raise StageExecutionError(
-                    500,
-                    "VEP_TIMEOUT",
-                    f"VEP timed out after {config['timeout_seconds']} seconds.",
-                    details={"timeout_seconds": int(config["timeout_seconds"])},
-                )
-
-            stats["vep_exit_code"] = int(completed.returncode)
-            stderr_text = (completed.stderr or b"").decode("utf-8", errors="replace")
-            if stderr_text:
-                stats["vep_stderr_tail"] = _tail(stderr_text)
-
-            if completed.returncode != 0:
-                details = {
-                    "exit_code": completed.returncode,
-                    "stderr_tail": _tail(stderr_text),
-                    "cmd": cmd,
-                    "hint": "Check VEP cache/plugin paths and command-line options.",
-                }
-                conn.execute("BEGIN IMMEDIATE")
-                clear_classifications_for_run(db_path, run_id, conn=conn, commit=False)
-                mark_stage_failed(
-                    db_path,
-                    run_id,
-                    "classification",
-                    input_uploaded_at=uploaded_at,
-                    error_code="VEP_FAILED",
-                    error_message="VEP execution failed.",
-                    error_details=details,
-                    conn=conn,
-                    commit=False,
-                )
-                conn.commit()
-                raise StageExecutionError(500, "VEP_FAILED", "VEP execution failed.", details=details)
-
-            try:
-                records = _load_vep_outputs(output_json_path)
-            except Exception as exc:
-                details = {"reason": str(exc), "output_path": output_json_path}
-                conn.execute("BEGIN IMMEDIATE")
-                clear_classifications_for_run(db_path, run_id, conn=conn, commit=False)
-                mark_stage_failed(
-                    db_path,
-                    run_id,
-                    "classification",
-                    input_uploaded_at=uploaded_at,
-                    error_code="VEP_PARSE_FAILED",
-                    error_message="Failed to parse VEP output.",
-                    error_details=details,
-                    conn=conn,
-                    commit=False,
-                )
-                conn.commit()
-                raise StageExecutionError(500, "VEP_PARSE_FAILED", "Failed to parse VEP output.", details=details)
-
-            variant_by_key: dict[tuple[str, int, str, str], dict] = {}
-            for variant in variants:
-                key = (
-                    _normalized_chrom(variant.get("chrom")),
-                    int(variant.get("pos")),
-                    str(variant.get("ref")),
-                    str(variant.get("alt")),
-                )
-                variant_by_key[key] = variant
-
-            terms_by_variant_id: dict[str, set[str]] = {}
-            matched_variant_ids: set[str] = set()
-            for record in records:
-                if not isinstance(record, dict):
-                    continue
-                key = _extract_variant_key(record)
-                if not key:
-                    continue
-                variant = variant_by_key.get(key)
-                if not variant:
-                    continue
-                variant_id = str(variant["variant_id"])
-                matched_variant_ids.add(variant_id)
-                terms = _extract_consequence_terms(record)
-                if not terms:
-                    continue
-                existing = terms_by_variant_id.get(variant_id) or set()
-                if len(terms) > len(existing):
-                    terms_by_variant_id[variant_id] = terms
-
             category_counts = {
                 "missense": 0,
                 "synonymous": 0,
@@ -603,58 +464,286 @@ def run_classification_stage(
                 "other": 0,
                 "unclassified": 0,
             }
-            rows: list[dict] = []
-            for variant in variants:
-                variant_id = str(variant["variant_id"])
-                terms = terms_by_variant_id.get(variant_id) or set()
-                category = _category_from_terms(terms)
-                reason_code = None
-                reason_message = None
-                if not category:
-                    category = "unclassified"
-                    if variant_id in matched_variant_ids:
-                        reason_code = "MISSING_VEP_CONSEQUENCE"
-                        reason_message = "VEP did not return consequence terms for this variant."
+            total_variants = 0
+            total_written = 0
+            total_records = 0
+            matched_total = 0
+
+            batch_size = int(config.get("batch_size") or 0)
+            if batch_size < 1:
+                batch_size = 0
+
+            cmd_base: list[str] = [str(config["cmd"])]
+            if config.get("script_path"):
+                cmd_base.append(str(config["script_path"]))
+
+            common_args = [
+                "--format",
+                "vcf",
+                "--json",
+                "--force_overwrite",
+                "--offline",
+                "--cache",
+                "--dir_cache",
+                str(config["cache_dir"]),
+                "--assembly",
+                str(config["assembly"]),
+            ]
+
+            if config.get("plugin_dir"):
+                common_args.extend(["--dir_plugins", str(config["plugin_dir"])])
+            if config.get("fasta_path"):
+                common_args.extend(["--fasta", str(config["fasta_path"])])
+
+            extra_args = list(config.get("extra_args") or [])
+
+            stats["vep_cmd"] = cmd_base[:2] if len(cmd_base) >= 2 else cmd_base
+            stats["vep_timeout_seconds"] = int(config["timeout_seconds"])
+
+            if batch_size:
+                stats["batch_size"] = batch_size
+                stats["input_vcf_glob"] = os.path.join(artifacts_dir, "classification.input.batch*.vcf")
+                stats["output_json_glob"] = os.path.join(artifacts_dir, "classification.vep.batch*.jsonl")
+            else:
+                stats["input_vcf_path"] = os.path.join(artifacts_dir, "classification.input.vcf")
+                stats["output_json_path"] = os.path.join(artifacts_dir, "classification.vep.jsonl")
+
+            variants_iter = iter_variants_for_run_with_ids(db_path, run_id, conn=conn)
+            if batch_size:
+                batch_iter = enumerate(_iter_batches(variants_iter, batch_size), start=1)
+            else:
+                all_variants = list(variants_iter)
+                batch_iter = [(1, all_variants)]
+
+            for batch_index, variants in batch_iter:
+                if not variants:
+                    continue
+
+                if _get_run_status(conn, run_id) == "canceled":
+                    conn.execute("BEGIN IMMEDIATE")
+                    mark_stage_canceled(
+                        db_path,
+                        run_id,
+                        "classification",
+                        input_uploaded_at=uploaded_at,
+                        conn=conn,
+                        commit=False,
+                    )
+                    clear_classifications_for_run(db_path, run_id, conn=conn, commit=False)
+                    conn.commit()
+                    raise StageExecutionError(409, "RUN_CANCELED", "Run was canceled.")
+
+                total_variants += len(variants)
+                input_vcf_path = os.path.join(
+                    artifacts_dir,
+                    "classification.input.batch{}.vcf".format(batch_index) if batch_size else "classification.input.vcf",
+                )
+                output_json_path = os.path.join(
+                    artifacts_dir,
+                    "classification.vep.batch{}.jsonl".format(batch_index) if batch_size else "classification.vep.jsonl",
+                )
+                variants_written = _write_minimal_vcf_fast(variants, input_vcf_path)
+                total_written += variants_written
+
+                cmd = list(cmd_base)
+                cmd.extend(["--input_file", input_vcf_path, "--output_file", output_json_path])
+                cmd.extend(common_args)
+                cmd.extend(extra_args)
+
+                try:
+                    completed = subprocess.run(
+                        cmd,
+                        cwd=None,
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.PIPE,
+                        check=False,
+                        timeout=int(config["timeout_seconds"]),
+                    )
+                except subprocess.TimeoutExpired as exc:
+                    stderr_raw = exc.stderr
+                    if isinstance(stderr_raw, bytes):
+                        stderr_text = stderr_raw.decode("utf-8", errors="replace")
                     else:
-                        reason_code = "TOOL_OUTPUT_MISSING"
-                        reason_message = "Variant was not present in VEP output."
-
-                category_counts[category] = category_counts.get(category, 0) + 1
-                rows.append(
-                    {
-                        "variant_id": variant_id,
-                        "consequence_category": category,
-                        "reason_code": reason_code,
-                        "reason_message": reason_message,
-                        "details": {
-                            "source_line": variant.get("source_line"),
-                            "source_tool": "vep",
-                            "vep_consequence_terms": sorted(terms),
-                        },
-                        "created_at": created_at,
+                        stderr_text = stderr_raw or ""
+                    details = {
+                        "timeout_seconds": int(config["timeout_seconds"]),
+                        "stderr_tail": _tail(stderr_text),
+                        "cmd": cmd,
+                        "batch_index": batch_index,
+                        "batch_size": len(variants),
+                        "input_vcf_path": input_vcf_path,
+                        "output_json_path": output_json_path,
                     }
-                )
+                    conn.execute("BEGIN IMMEDIATE")
+                    clear_classifications_for_run(db_path, run_id, conn=conn, commit=False)
+                    mark_stage_failed(
+                        db_path,
+                        run_id,
+                        "classification",
+                        input_uploaded_at=uploaded_at,
+                        error_code="VEP_TIMEOUT",
+                        error_message=f"VEP timed out after {config['timeout_seconds']} seconds.",
+                        error_details=details,
+                        conn=conn,
+                        commit=False,
+                    )
+                    conn.commit()
+                    raise StageExecutionError(
+                        500,
+                        "VEP_TIMEOUT",
+                        f"VEP timed out after {config['timeout_seconds']} seconds.",
+                        details={"timeout_seconds": int(config["timeout_seconds"])},
+                    )
 
-            if _get_run_status(conn, run_id) == "canceled":
+                stats["vep_exit_code"] = int(completed.returncode)
+                stderr_text = (completed.stderr or b"").decode("utf-8", errors="replace")
+                if stderr_text:
+                    stats["vep_stderr_tail"] = _tail(stderr_text)
+
+                if completed.returncode != 0:
+                    details = {
+                        "exit_code": completed.returncode,
+                        "stderr_tail": _tail(stderr_text),
+                        "cmd": cmd,
+                        "batch_index": batch_index,
+                        "batch_size": len(variants),
+                        "input_vcf_path": input_vcf_path,
+                        "output_json_path": output_json_path,
+                        "hint": "Check VEP cache/plugin paths and command-line options.",
+                    }
+                    conn.execute("BEGIN IMMEDIATE")
+                    clear_classifications_for_run(db_path, run_id, conn=conn, commit=False)
+                    mark_stage_failed(
+                        db_path,
+                        run_id,
+                        "classification",
+                        input_uploaded_at=uploaded_at,
+                        error_code="VEP_FAILED",
+                        error_message="VEP execution failed.",
+                        error_details=details,
+                        conn=conn,
+                        commit=False,
+                    )
+                    conn.commit()
+                    raise StageExecutionError(500, "VEP_FAILED", "VEP execution failed.", details=details)
+
+                try:
+                    records = _load_vep_outputs(output_json_path)
+                except Exception as exc:
+                    details = {
+                        "reason": str(exc),
+                        "output_path": output_json_path,
+                        "batch_index": batch_index,
+                        "batch_size": len(variants),
+                    }
+                    conn.execute("BEGIN IMMEDIATE")
+                    clear_classifications_for_run(db_path, run_id, conn=conn, commit=False)
+                    mark_stage_failed(
+                        db_path,
+                        run_id,
+                        "classification",
+                        input_uploaded_at=uploaded_at,
+                        error_code="VEP_PARSE_FAILED",
+                        error_message="Failed to parse VEP output.",
+                        error_details=details,
+                        conn=conn,
+                        commit=False,
+                    )
+                    conn.commit()
+                    raise StageExecutionError(500, "VEP_PARSE_FAILED", "Failed to parse VEP output.", details=details)
+
+                total_records += len(records)
+
+                variant_by_key: dict[tuple[str, int, str, str], dict] = {}
+                for variant in variants:
+                    key = (
+                        _normalized_chrom(variant.get("chrom")),
+                        int(variant.get("pos")),
+                        str(variant.get("ref")),
+                        str(variant.get("alt")),
+                    )
+                    variant_by_key[key] = variant
+
+                terms_by_variant_id: dict[str, set[str]] = {}
+                matched_variant_ids: set[str] = set()
+                for record in records:
+                    if not isinstance(record, dict):
+                        continue
+                    key = _extract_variant_key(record)
+                    if not key:
+                        continue
+                    variant = variant_by_key.get(key)
+                    if not variant:
+                        continue
+                    variant_id = str(variant["variant_id"])
+                    matched_variant_ids.add(variant_id)
+                    terms = _extract_consequence_terms(record)
+                    if not terms:
+                        continue
+                    existing = terms_by_variant_id.get(variant_id) or set()
+                    if len(terms) > len(existing):
+                        terms_by_variant_id[variant_id] = terms
+
+                rows: list[dict] = []
+                for variant in variants:
+                    variant_id = str(variant["variant_id"])
+                    terms = terms_by_variant_id.get(variant_id) or set()
+                    category = _category_from_terms(terms)
+                    reason_code = None
+                    reason_message = None
+                    if not category:
+                        category = "unclassified"
+                        if variant_id in matched_variant_ids:
+                            reason_code = "MISSING_VEP_CONSEQUENCE"
+                            reason_message = "VEP did not return consequence terms for this variant."
+                        else:
+                            reason_code = "TOOL_OUTPUT_MISSING"
+                            reason_message = "Variant was not present in VEP output."
+
+                    category_counts[category] = category_counts.get(category, 0) + 1
+                    rows.append(
+                        {
+                            "variant_id": variant_id,
+                            "consequence_category": category,
+                            "reason_code": reason_code,
+                            "reason_message": reason_message,
+                            "details": {
+                                "source_line": variant.get("source_line"),
+                                "source_tool": "vep",
+                                "vep_consequence_terms": sorted(terms),
+                            },
+                            "created_at": created_at,
+                        }
+                    )
+
+                if _get_run_status(conn, run_id) == "canceled":
+                    conn.execute("BEGIN IMMEDIATE")
+                    mark_stage_canceled(
+                        db_path,
+                        run_id,
+                        "classification",
+                        input_uploaded_at=uploaded_at,
+                        conn=conn,
+                        commit=False,
+                    )
+                    clear_classifications_for_run(db_path, run_id, conn=conn, commit=False)
+                    conn.commit()
+                    raise StageExecutionError(409, "RUN_CANCELED", "Run was canceled.")
+
                 conn.execute("BEGIN IMMEDIATE")
-                mark_stage_canceled(
-                    db_path,
-                    run_id,
-                    "classification",
-                    input_uploaded_at=uploaded_at,
-                    conn=conn,
-                    commit=False,
-                )
-                clear_classifications_for_run(db_path, run_id, conn=conn, commit=False)
+                upsert_classifications_for_run(db_path, run_id, rows, conn=conn, commit=False)
                 conn.commit()
-                raise StageExecutionError(409, "RUN_CANCELED", "Run was canceled.")
 
-            conn.execute("BEGIN IMMEDIATE")
-            upsert_classifications_for_run(db_path, run_id, rows, conn=conn, commit=False)
-            conn.commit()
+                matched_total += len(matched_variant_ids)
 
-            stats["vep_records_parsed"] = len(records)
-            stats["variants_with_vep_match"] = len(matched_variant_ids)
+            if batch_size:
+                stats["batch_count"] = int((total_variants + batch_size - 1) / batch_size) if total_variants else 0
+            else:
+                stats["batch_count"] = 1 if total_variants else 0
+            stats["variants_processed"] = total_variants
+            stats["variants_written"] = total_written
+            stats["vep_records_parsed"] = total_records
+            stats["variants_with_vep_match"] = matched_total
             stats["category_counts"] = category_counts
             stats["unclassified_count"] = category_counts.get("unclassified", 0)
 

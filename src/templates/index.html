@@ -147,9 +147,6 @@
 
                 <dt class="col-3 text-secondary">Reference build</dt>
                 <dd class="col-9 mb-0"><code id="current-run-reference-build">&mdash;</code></dd>
-
-                <dt class="col-3 text-secondary">Evidence policy</dt>
-                <dd class="col-9 mb-0"><code id="current-run-evidence-policy">&mdash;</code></dd>
               </dl>
 
               <div class="mt-4">
@@ -161,6 +158,30 @@
                   role="status"
                   aria-live="polite"
                 ></div>
+              </div>
+
+              <div class="mt-4">
+                <div class="d-flex align-items-baseline justify-content-between gap-2">
+                  <h3 class="h6 mb-2">Run logs</h3>
+                  <span class="small text-secondary">Latest entries</span>
+                </div>
+                <div
+                  id="run-logs-message"
+                  class="small text-secondary"
+                  role="note"
+                >
+                  Start a run to view recent log lines.
+                </div>
+                <div
+                  id="run-logs-panel"
+                  class="results-scroll-box mt-2"
+                  role="log"
+                  aria-live="polite"
+                  aria-label="Run logs"
+                  tabindex="0"
+                >
+                  <pre id="run-logs-console" class="small mb-0 font-monospace"></pre>
+                </div>
               </div>
 
               <div class="mt-3 small" role="status" aria-live="polite">
@@ -179,33 +200,38 @@
               tabindex="0"
             >
               <div class="alert alert-secondary small mb-3" role="status">
-                Partial results can appear while the pipeline is running. Final results are available after Reporting succeeds.
+                Partial results can appear while the pipeline is running. Final results are available after the Reporting stage succeeds.
               </div>
 
-              <ul class="nav nav-pills flex-wrap gap-2 mb-3" id="stage-results-tabs" role="tablist">
+              <div class="d-flex align-items-baseline justify-content-between gap-2 mb-3">
+                <h3 class="h6 mb-0">Stage results</h3>
+                <span class="small text-secondary">Select a stage tab to view detailed outputs.</span>
+              </div>
+
+              <ul class="nav nav-tabs mb-3" id="results-stage-tabs" role="tablist">
                 <li class="nav-item" role="presentation">
                   <button
                     class="nav-link active"
-                    id="stage-results-final-tab"
+                    id="results-stage-reporting-tab"
                     data-bs-toggle="tab"
-                    data-bs-target="#stage-results-final-pane"
+                    data-bs-target="#results-stage-reporting-pane"
                     type="button"
                     role="tab"
-                    aria-controls="stage-results-final-pane"
-                    aria-selected="true"
-                  >
-                    Final
+                  aria-controls="results-stage-reporting-pane"
+                  aria-selected="true"
+                >
+                    Reports
                   </button>
                 </li>
                 <li class="nav-item" role="presentation">
                   <button
                     class="nav-link"
-                    id="stage-results-parser-tab"
+                    id="results-stage-parser-tab"
                     data-bs-toggle="tab"
-                    data-bs-target="#stage-results-parser-pane"
+                    data-bs-target="#results-stage-parser-pane"
                     type="button"
                     role="tab"
-                    aria-controls="stage-results-parser-pane"
+                    aria-controls="results-stage-parser-pane"
                     aria-selected="false"
                   >
                     Parser
@@ -214,12 +240,12 @@
                 <li class="nav-item" role="presentation">
                   <button
                     class="nav-link"
-                    id="stage-results-pre-annotation-tab"
+                    id="results-stage-pre-annotation-tab"
                     data-bs-toggle="tab"
-                    data-bs-target="#stage-results-pre-annotation-pane"
+                    data-bs-target="#results-stage-pre-annotation-pane"
                     type="button"
                     role="tab"
-                    aria-controls="stage-results-pre-annotation-pane"
+                    aria-controls="results-stage-pre-annotation-pane"
                     aria-selected="false"
                   >
                     Pre-annotation
@@ -228,74 +254,64 @@
                 <li class="nav-item" role="presentation">
                   <button
                     class="nav-link"
-                    id="stage-results-classification-tab"
+                    id="results-stage-classification-tab"
                     data-bs-toggle="tab"
-                    data-bs-target="#stage-results-classification-pane"
+                    data-bs-target="#results-stage-classification-pane"
                     type="button"
                     role="tab"
-                    aria-controls="stage-results-classification-pane"
+                    aria-controls="results-stage-classification-pane"
                     aria-selected="false"
                   >
-                    Classification
+                    Consequence
                   </button>
                 </li>
                 <li class="nav-item" role="presentation">
                   <button
                     class="nav-link"
-                    id="stage-results-prediction-tab"
+                    id="results-stage-prediction-tab"
                     data-bs-toggle="tab"
-                    data-bs-target="#stage-results-prediction-pane"
+                    data-bs-target="#results-stage-prediction-pane"
                     type="button"
                     role="tab"
-                    aria-controls="stage-results-prediction-pane"
+                    aria-controls="results-stage-prediction-pane"
                     aria-selected="false"
                   >
-                    Prediction
+                    Functional prediction
                   </button>
                 </li>
                 <li class="nav-item" role="presentation">
                   <button
                     class="nav-link"
-                    id="stage-results-annotation-tab"
+                    id="results-stage-annotation-tab"
                     data-bs-toggle="tab"
-                    data-bs-target="#stage-results-annotation-pane"
+                    data-bs-target="#results-stage-annotation-pane"
                     type="button"
                     role="tab"
-                    aria-controls="stage-results-annotation-pane"
+                    aria-controls="results-stage-annotation-pane"
                     aria-selected="false"
                   >
-                    Annotation
-                  </button>
-                </li>
-                <li class="nav-item" role="presentation">
-                  <button
-                    class="nav-link"
-                    id="stage-results-reporting-tab"
-                    data-bs-toggle="tab"
-                    data-bs-target="#stage-results-reporting-pane"
-                    type="button"
-                    role="tab"
-                    aria-controls="stage-results-reporting-pane"
-                    aria-selected="false"
-                  >
-                    Reporting
+                    Evidence annotation
                   </button>
                 </li>
               </ul>
 
-              <div class="tab-content" id="stage-results-tab-content">
+              <div class="tab-content" id="results-stage-tab-content">
                 <div
                   class="tab-pane fade show active"
-                  id="stage-results-final-pane"
+                  id="results-stage-reporting-pane"
                   role="tabpanel"
-                  aria-labelledby="stage-results-final-tab"
+                  aria-labelledby="results-stage-reporting-tab"
                   tabindex="0"
                 >
-                  <div class="card border-0 bg-light-subtle mb-3">
-                    <div class="card-body py-2">
+                  <section id="stage-results-final-pane">
+                    <div class="card border-0 bg-light-subtle mb-3">
+                      <div class="card-body py-2">
                       <div class="d-flex align-items-baseline justify-content-between gap-2">
-                        <h3 class="h6 mb-1">Final Result</h3>
-                        <span class="badge text-bg-light border">Source stage: <code>reporting</code></span>
+                        <h3 class="h6 mb-1">Reports</h3>
+                        <span class="badge text-bg-light border">Produced by stage: <code>reporting</code></span>
+                      </div>
+                      <div class="small text-secondary mb-1">
+                        Pipeline-level outcome only. Detailed stage diagnostics are shown in Evidence annotation.
                       </div>
                       <div
                         id="final-results-message"
@@ -305,21 +321,131 @@
                       >
                         Start a run to view partial and final results.
                       </div>
+                      <div class="mt-3">
+                        <div class="small fw-semibold mb-1">Reports Summary</div>
+                        <div id="reporting-summary-note" class="small text-secondary mb-2" role="note">
+                          The reporting stage synthesizes stage outputs and evidence diagnostics into concise highlights.
+                        </div>
+                        <div
+                          id="reporting-results-message"
+                          class="small text-secondary"
+                          role="status"
+                          aria-live="polite"
+                        ></div>
+                        <div
+                          id="reporting-results-summary"
+                          class="small mt-2 results-scroll-box results-scroll-summary"
+                          aria-label="Reports summary"
+                          tabindex="0"
+                        ></div>
+                        <div class="small fw-semibold mb-1 mt-3">Significant results</div>
+                        <div
+                          id="reporting-significant-results"
+                          class="small mt-2 results-scroll-box results-scroll-summary"
+                          aria-label="Reports significant results"
+                          tabindex="0"
+                        ></div>
+                        <div class="small fw-semibold mb-1 mt-3">Evidence diagnostics (summary)</div>
+                        <div
+                          id="reporting-evidence-diagnostics"
+                          class="small mt-2 results-scroll-box results-scroll-summary"
+                          aria-label="Reports evidence diagnostics"
+                          tabindex="0"
+                        ></div>
+                      </div>
+                      <div class="mt-3">
+                        <div class="small fw-semibold mb-1">Variant Summary</div>
+                        <div class="d-flex flex-wrap align-items-center gap-2 small mb-2">
+                          <label for="variant-summary-completeness-filter" class="text-secondary">Completion:</label>
+                          <select id="variant-summary-completeness-filter" class="form-select form-select-sm w-auto">
+                            <option value="">All statuses</option>
+                            <option value="complete">Complete</option>
+                            <option value="partial">Partial</option>
+                            <option value="unavailable">Unavailable</option>
+                            <option value="failed">Failed</option>
+                          </select>
+                        </div>
+                        <div
+                          id="variant-summary-message"
+                          class="small text-secondary"
+                          role="status"
+                          aria-live="polite"
+                        ></div>
+                        <div class="results-scroll-box mt-2" aria-label="Variant summary table" tabindex="0">
+                          <div class="table-responsive">
+                            <table
+                              id="variant-summary-table"
+                              class="table table-sm table-striped table-hover align-middle mb-0"
+                              hidden
+                            >
+                              <thead class="table-light">
+                                <tr>
+                                  <th scope="col">Variant</th>
+                                  <th scope="col">Chrom</th>
+                                  <th scope="col">Pos</th>
+                                  <th scope="col">Ref</th>
+                                  <th scope="col">Alt</th>
+                                  <th scope="col">Classification</th>
+                                  <th scope="col">Prediction</th>
+                                  <th scope="col">Evidence</th>
+                                  <th scope="col">Completeness</th>
+                                </tr>
+                              </thead>
+                              <tbody id="variant-summary-body"></tbody>
+                            </table>
+                          </div>
+                        </div>
+                        <div class="d-flex align-items-center gap-2 mt-2 small">
+                          <button
+                            id="variant-summary-page-prev"
+                            class="btn btn-sm btn-outline-secondary"
+                            type="button"
+                          >
+                            Prev
+                          </button>
+                          <button
+                            id="variant-summary-page-next"
+                            class="btn btn-sm btn-outline-secondary"
+                            type="button"
+                          >
+                            Next
+                          </button>
+                          <span id="variant-summary-page-label" class="text-secondary"></span>
+                        </div>
+                      </div>
+                      <div class="mt-4">
+                        <div class="d-flex align-items-baseline justify-content-between gap-2">
+                          <h3 class="h6 mb-2">HTML artifacts</h3>
+                          <span class="badge text-bg-light border">Produced by stage: <code>reporting</code></span>
+                        </div>
+                        <div class="small text-secondary mb-2">
+                          Rendered HTML summaries (graphs and tables) for the current run.
+                        </div>
+                        <div
+                          id="final-html-artifacts-message"
+                          class="small text-secondary"
+                          role="status"
+                          aria-live="polite"
+                        ></div>
+                        <div id="final-html-artifacts" class="mt-2"></div>
+                      </div>
                     </div>
                   </div>
+                </section>
                 </div>
 
                 <div
                   class="tab-pane fade"
-                  id="stage-results-parser-pane"
+                  id="results-stage-parser-pane"
                   role="tabpanel"
-                  aria-labelledby="stage-results-parser-tab"
+                  aria-labelledby="results-stage-parser-tab"
                   tabindex="0"
                 >
+                  <section id="stage-results-parser-pane">
                   <div class="card shadow-sm border-0">
                     <div class="card-body">
                       <div class="d-flex align-items-baseline justify-content-between gap-2">
-                        <h3 class="h6 mb-2">Parser Output</h3>
+                        <h3 class="h6 mb-2">Parsing</h3>
                         <span class="badge text-bg-light border">Produced by stage: <code>parser</code></span>
                       </div>
                       <div
@@ -328,18 +454,25 @@
                         role="status"
                         aria-live="polite"
                       ></div>
-                      <div id="parser-results-summary" class="small mt-2 results-scroll-box results-scroll-summary"></div>
+                      <div
+                        id="parser-results-summary"
+                        class="small mt-2 results-scroll-box results-scroll-summary"
+                        aria-label="Parser summary"
+                        tabindex="0"
+                      ></div>
                     </div>
                   </div>
+                </section>
                 </div>
 
                 <div
                   class="tab-pane fade"
-                  id="stage-results-pre-annotation-pane"
+                  id="results-stage-pre-annotation-pane"
                   role="tabpanel"
-                  aria-labelledby="stage-results-pre-annotation-tab"
+                  aria-labelledby="results-stage-pre-annotation-tab"
                   tabindex="0"
                 >
+                  <section id="stage-results-pre-annotation-pane">
                   <div class="card shadow-sm border-0">
                     <div class="card-body">
                       <div class="d-flex align-items-baseline justify-content-between gap-2">
@@ -352,7 +485,7 @@
                         role="status"
                         aria-live="polite"
                       ></div>
-                      <div class="results-scroll-box mt-2">
+                      <div class="results-scroll-box mt-2" aria-label="Pre-annotation results table" tabindex="0">
                         <div class="table-responsive">
                           <table
                             id="pre-annotation-results-table"
@@ -372,25 +505,55 @@
                           </table>
                         </div>
                       </div>
+                      <div class="d-flex align-items-center gap-2 mt-2 small">
+                        <button
+                          id="pre-annotation-page-prev"
+                          class="btn btn-sm btn-outline-secondary"
+                          type="button"
+                        >
+                          Prev
+                        </button>
+                        <button
+                          id="pre-annotation-page-next"
+                          class="btn btn-sm btn-outline-secondary"
+                          type="button"
+                        >
+                          Next
+                        </button>
+                        <span id="pre-annotation-page-label" class="text-secondary"></span>
+                      </div>
                     </div>
                   </div>
+                </section>
                 </div>
 
                 <div
                   class="tab-pane fade"
-                  id="stage-results-classification-pane"
+                  id="results-stage-classification-pane"
                   role="tabpanel"
-                  aria-labelledby="stage-results-classification-tab"
+                  aria-labelledby="results-stage-classification-tab"
                   tabindex="0"
                 >
+                  <section id="stage-results-classification-pane">
                   <div class="card shadow-sm border-0">
                     <div class="card-body">
                       <div class="d-flex align-items-baseline justify-content-between gap-2">
-                        <h3 class="h6 mb-2">Classification</h3>
+                        <h3 class="h6 mb-2">Consequence annotation (VEP)</h3>
                         <span class="badge text-bg-light border">Produced by stage: <code>classification</code></span>
                       </div>
                       <div class="small text-secondary mb-2">
-                        Classification is derived from VEP consequence terms.
+                        Consequence annotation is derived from VEP consequence terms.
+                      </div>
+                      <div class="d-flex flex-wrap align-items-center gap-2 small mb-2">
+                        <label for="classification-filter" class="text-secondary">Filter:</label>
+                        <select id="classification-filter" class="form-select form-select-sm w-auto">
+                          <option value="">All consequences</option>
+                          <option value="missense">Missense</option>
+                          <option value="synonymous">Synonymous</option>
+                          <option value="nonsense">Nonsense</option>
+                          <option value="other">Other</option>
+                          <option value="unclassified">Unclassified</option>
+                        </select>
                       </div>
                       <div
                         id="classification-results-message"
@@ -398,7 +561,7 @@
                         role="status"
                         aria-live="polite"
                       ></div>
-                      <div class="results-scroll-box mt-2">
+                      <div class="results-scroll-box mt-2" aria-label="Classification results table" tabindex="0">
                         <div class="table-responsive">
                           <table
                             id="classification-results-table"
@@ -416,21 +579,115 @@
                           </table>
                         </div>
                       </div>
+                      <div class="d-flex align-items-center gap-2 mt-2 small">
+                        <button
+                          id="classification-page-prev"
+                          class="btn btn-sm btn-outline-secondary"
+                          type="button"
+                        >
+                          Prev
+                        </button>
+                        <button
+                          id="classification-page-next"
+                          class="btn btn-sm btn-outline-secondary"
+                          type="button"
+                        >
+                          Next
+                        </button>
+                        <span id="classification-page-label" class="text-secondary"></span>
+                      </div>
+                      <div class="mt-4">
+                        <div class="small fw-semibold mb-1">Classification artifacts (full)</div>
+                        <div
+                          id="classification-artifacts-message"
+                          class="small text-secondary"
+                          role="status"
+                          aria-live="polite"
+                        ></div>
+
+                        <div class="mt-3">
+                          <div class="small fw-semibold mb-1">Input VCF</div>
+                          <div class="d-flex flex-wrap align-items-center gap-2 small mb-2">
+                            <label for="classification-input-vcf-pos" class="text-secondary">Position:</label>
+                            <input
+                              id="classification-input-vcf-pos"
+                              class="form-control form-control-sm w-auto"
+                              type="number"
+                              min="1"
+                              placeholder="e.g. 69134"
+                            />
+                            <button
+                              id="classification-input-vcf-search"
+                              class="btn btn-sm btn-outline-secondary"
+                              type="button"
+                            >
+                              Search
+                            </button>
+                            <button
+                              id="classification-input-vcf-clear"
+                              class="btn btn-sm btn-link px-1"
+                              type="button"
+                            >
+                              Clear
+                            </button>
+                          </div>
+                          <div
+                            id="classification-input-vcf-message"
+                            class="small text-secondary"
+                            role="status"
+                            aria-live="polite"
+                          ></div>
+                            <div class="results-scroll-box mt-2" aria-label="Classification input VCF preview" tabindex="0">
+                            <div class="table-responsive">
+                              <table
+                                id="classification-input-vcf-table"
+                                class="table table-sm table-striped table-hover align-middle mb-0"
+                                hidden
+                              >
+                                <thead class="table-light">
+                                  <tr id="classification-input-vcf-head-row"></tr>
+                                </thead>
+                                <tbody id="classification-input-vcf-body"></tbody>
+                              </table>
+                            </div>
+                          </div>
+                          <div class="d-flex align-items-center gap-2 mt-2 small">
+                            <button
+                              id="classification-input-vcf-page-prev"
+                              class="btn btn-sm btn-outline-secondary"
+                              type="button"
+                            >
+                              Prev
+                            </button>
+                            <button
+                              id="classification-input-vcf-page-next"
+                              class="btn btn-sm btn-outline-secondary"
+                              type="button"
+                            >
+                              Next
+                            </button>
+                            <span id="classification-input-vcf-page-label" class="text-secondary"></span>
+                          </div>
+                        </div>
+
+                      </div>
                     </div>
                   </div>
+                </section>
                 </div>
 
                 <div
                   class="tab-pane fade"
-                  id="stage-results-prediction-pane"
+                  id="results-stage-prediction-pane"
                   role="tabpanel"
-                  aria-labelledby="stage-results-prediction-tab"
+                  aria-labelledby="results-stage-prediction-tab"
                   tabindex="0"
                 >
+                  <section id="stage-results-prediction-pane">
                   <div class="card shadow-sm border-0">
                     <div class="card-body">
                       <div class="d-flex align-items-baseline justify-content-between gap-2">
-                        <h3 class="h6 mb-2">Prediction</h3>
+                        <h3 class="h6 mb-2">Functional prediction</h3>
                         <span class="badge text-bg-light border">Produced by stage: <code>prediction</code></span>
                       </div>
                       <div
@@ -450,7 +707,7 @@
                           Show <code>not_applicable</code> rows
                         </label>
                       </div>
-                      <div class="results-scroll-box mt-2">
+                      <div class="results-scroll-box mt-2" aria-label="Prediction results table" tabindex="0">
                         <div class="table-responsive">
                           <table
                             id="prediction-results-table"
@@ -470,22 +727,119 @@
                           </table>
                         </div>
                       </div>
+                      <div class="d-flex align-items-center gap-2 mt-2 small">
+                        <button
+                          id="prediction-page-prev"
+                          class="btn btn-sm btn-outline-secondary"
+                          type="button"
+                        >
+                          Prev
+                        </button>
+                        <button
+                          id="prediction-page-next"
+                          class="btn btn-sm btn-outline-secondary"
+                          type="button"
+                        >
+                          Next
+                        </button>
+                        <span id="prediction-page-label" class="text-secondary"></span>
+                      </div>
+                      <div class="mt-4">
+                        <div class="small fw-semibold mb-1">Prediction artifacts (full)</div>
+                        <div
+                          id="prediction-artifacts-message"
+                          class="small text-secondary"
+                          role="status"
+                          aria-live="polite"
+                        ></div>
+
+                        <div class="mt-3">
+                          <div class="small fw-semibold mb-1">Input VCF</div>
+                          <div class="d-flex flex-wrap align-items-center gap-2 small mb-2">
+                            <label for="prediction-input-vcf-pos" class="text-secondary">Position:</label>
+                            <input
+                              id="prediction-input-vcf-pos"
+                              class="form-control form-control-sm w-auto"
+                              type="number"
+                              min="1"
+                              placeholder="e.g. 69134"
+                            />
+                            <button
+                              id="prediction-input-vcf-search"
+                              class="btn btn-sm btn-outline-secondary"
+                              type="button"
+                            >
+                              Search
+                            </button>
+                            <button
+                              id="prediction-input-vcf-clear"
+                              class="btn btn-sm btn-link px-1"
+                              type="button"
+                            >
+                              Clear
+                            </button>
+                          </div>
+                          <div
+                            id="prediction-input-vcf-message"
+                            class="small text-secondary"
+                            role="status"
+                            aria-live="polite"
+                          ></div>
+                            <div class="results-scroll-box mt-2" aria-label="Prediction input VCF preview" tabindex="0">
+                            <div class="table-responsive">
+                              <table
+                                id="prediction-input-vcf-table"
+                                class="table table-sm table-striped table-hover align-middle mb-0"
+                                hidden
+                              >
+                                <thead class="table-light">
+                                  <tr id="prediction-input-vcf-head-row"></tr>
+                                </thead>
+                                <tbody id="prediction-input-vcf-body"></tbody>
+                              </table>
+                            </div>
+                          </div>
+                          <div class="d-flex align-items-center gap-2 mt-2 small">
+                            <button
+                              id="prediction-input-vcf-page-prev"
+                              class="btn btn-sm btn-outline-secondary"
+                              type="button"
+                            >
+                              Prev
+                            </button>
+                            <button
+                              id="prediction-input-vcf-page-next"
+                              class="btn btn-sm btn-outline-secondary"
+                              type="button"
+                            >
+                              Next
+                            </button>
+                            <span id="prediction-input-vcf-page-label" class="text-secondary"></span>
+                          </div>
+                        </div>
+
+                      </div>
                     </div>
                   </div>
+                </section>
                 </div>
 
                 <div
                   class="tab-pane fade"
-                  id="stage-results-annotation-pane"
+                  id="results-stage-annotation-pane"
                   role="tabpanel"
-                  aria-labelledby="stage-results-annotation-tab"
+                  aria-labelledby="results-stage-annotation-tab"
                   tabindex="0"
                 >
+                  <section id="stage-results-annotation-pane">
                   <div class="card shadow-sm border-0 h-100">
                     <div class="card-body">
                       <div class="d-flex align-items-baseline justify-content-between gap-2">
-                        <h3 class="h6 mb-2">Annotation</h3>
+                        <h3 class="h6 mb-2">Evidence annotation</h3>
                         <span class="badge text-bg-light border">Produced by stage: <code>annotation</code></span>
+                      </div>
+                      <div class="small text-secondary mb-2" role="note">
+                        Stage-level technical output: tool execution summary, evidence diagnostics, and annotated VCF preview.
                       </div>
                       <div
                         id="annotation-results-message"
@@ -493,7 +847,12 @@
                         role="status"
                         aria-live="polite"
                       ></div>
-                      <div id="annotation-results-summary" class="small mt-2 results-scroll-box results-scroll-summary"></div>
+                      <div
+                        id="annotation-results-summary"
+                        class="small mt-2 results-scroll-box results-scroll-summary"
+                        aria-label="Annotation summary"
+                        tabindex="0"
+                      ></div>
                       <div class="mt-3">
                         <div class="small fw-semibold mb-1">Evidence Diagnostics</div>
                         <div
@@ -502,7 +861,7 @@
                           role="status"
                           aria-live="polite"
                         ></div>
-                        <div class="results-scroll-box mt-2">
+                        <div class="results-scroll-box mt-2" aria-label="Annotation diagnostics table" tabindex="0">
                           <div class="table-responsive">
                             <table
                               id="annotation-diagnostics-table"
@@ -513,7 +872,11 @@
                                 <tr>
                                   <th scope="col">Source</th>
                                   <th scope="col">Enabled</th>
+                                  <th scope="col">Outcome</th>
+                                  <th scope="col">Completeness impact</th>
                                   <th scope="col">Errors</th>
+                                  <th scope="col">Retry attempts</th>
+                                  <th scope="col">Error sample</th>
                                   <th scope="col">Top reason codes</th>
                                   <th scope="col">HTTP status counts</th>
                                   <th scope="col">Hint</th>
@@ -525,14 +888,153 @@
                         </div>
                       </div>
                       <div class="mt-3">
+                        <div class="small fw-semibold mb-1">Evidence Results</div>
+                        <div class="d-flex flex-wrap align-items-center gap-2 small mb-2">
+                          <label for="annotation-evidence-classification-filter" class="text-secondary">Filter:</label>
+                          <select
+                            id="annotation-evidence-classification-filter"
+                            class="form-select form-select-sm w-auto"
+                            disabled
+                          >
+                            <option value="missense">Missense (only)</option>
+                          </select>
+                          <label for="annotation-evidence-outcome-filter" class="text-secondary ms-2">Outcome:</label>
+                          <select
+                            id="annotation-evidence-outcome-filter"
+                            class="form-select form-select-sm w-auto"
+                          >
+                            <option value="all">All</option>
+                            <option value="found">Found</option>
+                            <option value="not_found">Not found</option>
+                            <option value="error">Errors</option>
+                          </select>
+                          <span class="text-secondary">Evidence is collected for missense variants only.</span>
+                        </div>
+                        <div class="mt-2">
+                          <div class="small fw-semibold mb-1">dbSNP</div>
+                          <div
+                            id="annotation-dbsnp-message"
+                            class="small text-secondary"
+                            role="status"
+                            aria-live="polite"
+                          ></div>
+                          <div class="results-scroll-box mt-2" aria-label="dbSNP evidence table" tabindex="0">
+                            <div class="table-responsive">
+                              <table
+                                id="annotation-dbsnp-table"
+                                class="table table-sm table-striped table-hover align-middle mb-0"
+                                hidden
+                              >
+                                <thead class="table-light">
+                                  <tr>
+                                    <th scope="col">Variant</th>
+                                    <th scope="col">Outcome</th>
+                                    <th scope="col">rsID</th>
+                                    <th scope="col">Reason</th>
+                                    <th scope="col">Retrieved</th>
+                                  </tr>
+                                </thead>
+                                <tbody id="annotation-dbsnp-body"></tbody>
+                              </table>
+                            </div>
+                          </div>
+                        </div>
+
+                        <div class="mt-3">
+                          <div class="small fw-semibold mb-1">ClinVar</div>
+                          <div
+                            id="annotation-clinvar-message"
+                            class="small text-secondary"
+                            role="status"
+                            aria-live="polite"
+                          ></div>
+                          <div class="results-scroll-box mt-2" aria-label="ClinVar evidence table" tabindex="0">
+                            <div class="table-responsive">
+                              <table
+                                id="annotation-clinvar-table"
+                                class="table table-sm table-striped table-hover align-middle mb-0"
+                                hidden
+                              >
+                                <thead class="table-light">
+                                  <tr>
+                                    <th scope="col">Variant</th>
+                                    <th scope="col">Outcome</th>
+                                    <th scope="col">ClinVar ID</th>
+                                    <th scope="col">Clinical significance</th>
+                                    <th scope="col">Reason</th>
+                                    <th scope="col">Retrieved</th>
+                                  </tr>
+                                </thead>
+                                <tbody id="annotation-clinvar-body"></tbody>
+                              </table>
+                            </div>
+                          </div>
+                        </div>
+
+                        <div class="mt-3">
+                          <div class="small fw-semibold mb-1">gnomAD</div>
+                          <div
+                            id="annotation-gnomad-message"
+                            class="small text-secondary"
+                            role="status"
+                            aria-live="polite"
+                          ></div>
+                          <div class="results-scroll-box mt-2" aria-label="gnomAD evidence table" tabindex="0">
+                            <div class="table-responsive">
+                              <table
+                                id="annotation-gnomad-table"
+                                class="table table-sm table-striped table-hover align-middle mb-0"
+                                hidden
+                              >
+                                <thead class="table-light">
+                                  <tr>
+                                    <th scope="col">Variant</th>
+                                    <th scope="col">Outcome</th>
+                                    <th scope="col">Variant ID</th>
+                                    <th scope="col">Global AF</th>
+                                    <th scope="col">Reason</th>
+                                    <th scope="col">Retrieved</th>
+                                  </tr>
+                                </thead>
+                                <tbody id="annotation-gnomad-body"></tbody>
+                              </table>
+                            </div>
+                          </div>
+                        </div>
+                      </div>
+                      <div class="mt-3">
                         <div class="small fw-semibold mb-1">Annotated VCF Output</div>
+                        <div class="d-flex flex-wrap align-items-center gap-2 small mb-2">
+                          <label for="annotation-vcf-pos" class="text-secondary">Position:</label>
+                          <input
+                            id="annotation-vcf-pos"
+                            class="form-control form-control-sm w-auto"
+                            type="number"
+                            min="1"
+                            placeholder="e.g. 69134"
+                          />
+                          <button
+                            id="annotation-vcf-search"
+                            class="btn btn-sm btn-outline-secondary"
+                            type="button"
+                          >
+                            Search
+                          </button>
+                          <button
+                            id="annotation-vcf-clear"
+                            class="btn btn-sm btn-link px-1"
+                            type="button"
+                          >
+                            Clear
+                          </button>
+                        </div>
                         <div
                           id="annotation-vcf-message"
                           class="small text-secondary"
                           role="status"
                           aria-live="polite"
                         ></div>
-                        <div class="results-scroll-box mt-2">
+                        <div class="results-scroll-box mt-2" aria-label="Annotated VCF preview table" tabindex="0">
                           <div class="table-responsive">
                             <table
                               id="annotation-vcf-table"
@@ -543,36 +1045,30 @@
                                 <tr id="annotation-vcf-head-row"></tr>
                               </thead>
                               <tbody id="annotation-vcf-body"></tbody>
-                            </table>
+                              </table>
+                            </div>
                           </div>
-                        </div>
+                          <div class="d-flex align-items-center gap-2 mt-2 small">
+                            <button
+                              id="annotation-vcf-page-prev"
+                              class="btn btn-sm btn-outline-secondary"
+                              type="button"
+                            >
+                              Prev
+                            </button>
+                            <button
+                              id="annotation-vcf-page-next"
+                              class="btn btn-sm btn-outline-secondary"
+                              type="button"
+                            >
+                              Next
+                            </button>
+                            <span id="annotation-vcf-page-label" class="text-secondary"></span>
+                          </div>
                       </div>
                     </div>
                   </div>
-                </div>
-
-                <div
-                  class="tab-pane fade"
-                  id="stage-results-reporting-pane"
-                  role="tabpanel"
-                  aria-labelledby="stage-results-reporting-tab"
-                  tabindex="0"
-                >
-                  <div class="card shadow-sm border-0 h-100">
-                    <div class="card-body">
-                      <div class="d-flex align-items-baseline justify-content-between gap-2">
-                        <h3 class="h6 mb-2">Reporting</h3>
-                        <span class="badge text-bg-light border">Produced by stage: <code>reporting</code></span>
-                      </div>
-                      <div
-                        id="reporting-results-message"
-                        class="small text-secondary"
-                        role="status"
-                        aria-live="polite"
-                      ></div>
-                      <div id="reporting-results-summary" class="small mt-2 results-scroll-box results-scroll-summary"></div>
-                    </div>
-                  </div>
+                </section>
                 </div>
               </div>
             </div>
@@ -582,159 +1078,310 @@
     </div>
 
     <div
-          class="offcanvas offcanvas-end"
-          tabindex="-1"
-          id="variant-details-offcanvas"
-          aria-labelledby="variant-details-title"
-        >
-          <div class="offcanvas-header">
-            <h2 class="h5 offcanvas-title" id="variant-details-title">Variant details</h2>
-            <button
-              type="button"
-              class="btn-close"
-              data-bs-dismiss="offcanvas"
-              aria-label="Close"
-            ></button>
+      class="offcanvas offcanvas-end"
+      tabindex="-1"
+      id="variant-details-offcanvas"
+      aria-labelledby="variant-details-title"
+    >
+      <div class="offcanvas-header">
+        <div>
+          <h2 class="h5 mb-1" id="variant-details-title">Variant details</h2>
+          <div class="small text-secondary">
+            Variant: <code id="variant-details-key">&mdash;</code>
           </div>
-          <div class="offcanvas-body">
-            <div id="variant-details-message" class="small text-secondary" role="status" aria-live="polite"></div>
+        </div>
+        <button type="button" class="btn-close text-reset" data-bs-dismiss="offcanvas" aria-label="Close"></button>
+      </div>
+      <div class="offcanvas-body">
+        <div id="variant-details-message" class="small text-secondary mb-3" role="status" aria-live="polite"></div>
 
-            <div class="mt-3">
-              <h3 class="h6 mb-1">Variant</h3>
-              <div class="small text-secondary mb-2">Selected: <code id="variant-details-key">&mdash;</code></div>
+        <div class="mb-4">
+          <div class="d-flex align-items-baseline justify-content-between gap-2 mb-2">
+            <div class="small fw-semibold">Pre-annotation</div>
+            <span class="badge text-bg-light border">Produced by stage: <code>pre_annotation</code></span>
+          </div>
+          <dl class="row small mb-0">
+            <dt class="col-5 text-secondary">
+              <div class="d-flex flex-column gap-1">
+                <span>Base change</span>
+                <span
+                  class="badge text-bg-light border d-inline-flex align-items-center gap-1"
+                  data-stage="pre_annotation"
+                >
+                  <span aria-hidden="true">&#9432;</span>
+                  Stage: <code>pre_annotation</code>
+                </span>
+              </div>
+            </dt>
+            <dd class="col-7 mb-2"><span id="variant-pre-base-change">&mdash;</span></dd>
+
+            <dt class="col-5 text-secondary">
+              <div class="d-flex flex-column gap-1">
+                <span>Substitution class</span>
+                <span
+                  class="badge text-bg-light border d-inline-flex align-items-center gap-1"
+                  data-stage="pre_annotation"
+                >
+                  <span aria-hidden="true">&#9432;</span>
+                  Stage: <code>pre_annotation</code>
+                </span>
+              </div>
+            </dt>
+            <dd class="col-7 mb-2"><span id="variant-pre-substitution-class">&mdash;</span></dd>
+
+            <dt class="col-5 text-secondary">
+              <div class="d-flex flex-column gap-1">
+                <span>Reference class</span>
+                <span
+                  class="badge text-bg-light border d-inline-flex align-items-center gap-1"
+                  data-stage="pre_annotation"
+                >
+                  <span aria-hidden="true">&#9432;</span>
+                  Stage: <code>pre_annotation</code>
+                </span>
+              </div>
+            </dt>
+            <dd class="col-7 mb-2"><span id="variant-pre-ref-class">&mdash;</span></dd>
+
+            <dt class="col-5 text-secondary">
+              <div class="d-flex flex-column gap-1">
+                <span>Alt class</span>
+                <span
+                  class="badge text-bg-light border d-inline-flex align-items-center gap-1"
+                  data-stage="pre_annotation"
+                >
+                  <span aria-hidden="true">&#9432;</span>
+                  Stage: <code>pre_annotation</code>
+                </span>
+              </div>
+            </dt>
+            <dd class="col-7 mb-0"><span id="variant-pre-alt-class">&mdash;</span></dd>
+          </dl>
+        </div>
+
+        <div class="mb-4">
+          <div class="d-flex align-items-baseline justify-content-between gap-2 mb-2">
+            <div class="small fw-semibold">Consequence classification</div>
+            <span class="badge text-bg-light border">Produced by stage: <code>classification</code></span>
+          </div>
+          <dl class="row small mb-0">
+            <dt class="col-5 text-secondary">
+              <div class="d-flex flex-column gap-1">
+                <span>Category</span>
+                <span
+                  class="badge text-bg-light border d-inline-flex align-items-center gap-1"
+                  data-stage="classification"
+                >
+                  <span aria-hidden="true">&#9432;</span>
+                  Stage: <code>classification</code>
+                </span>
+              </div>
+            </dt>
+            <dd class="col-7 mb-2"><span id="variant-cls-category">&mdash;</span></dd>
+
+            <dt class="col-5 text-secondary">
+              <div class="d-flex flex-column gap-1">
+                <span>Reason</span>
+                <span
+                  class="badge text-bg-light border d-inline-flex align-items-center gap-1"
+                  data-stage="classification"
+                >
+                  <span aria-hidden="true">&#9432;</span>
+                  Stage: <code>classification</code>
+                </span>
+              </div>
+            </dt>
+            <dd class="col-7 mb-0"><span id="variant-cls-reason">&mdash;</span></dd>
+          </dl>
+        </div>
+
+        <div class="mb-4">
+          <div class="d-flex align-items-baseline justify-content-between gap-2 mb-2">
+            <div class="small fw-semibold">Prediction outputs</div>
+            <span class="badge text-bg-light border">Produced by stage: <code>prediction</code></span>
+          </div>
+          <div id="variant-predictions-message" class="small text-secondary mb-2" role="status" aria-live="polite"></div>
+
+          <div class="border rounded-3 p-2 mb-3">
+            <div class="d-flex align-items-baseline justify-content-between gap-2 mb-2">
+              <div class="small fw-semibold">SIFT</div>
+              <span
+                class="badge text-bg-light border d-inline-flex align-items-center gap-1"
+                data-stage="prediction"
+              >
+                <span aria-hidden="true">&#9432;</span>
+                Stage: <code>prediction</code>
+              </span>
             </div>
+            <dl class="row small mb-0">
+              <dt class="col-5 text-secondary">Outcome</dt>
+              <dd class="col-7 mb-2"><span id="variant-pred-sift-outcome">&mdash;</span></dd>
+              <dt class="col-5 text-secondary">Score</dt>
+              <dd class="col-7 mb-2"><span id="variant-pred-sift-score">&mdash;</span></dd>
+              <dt class="col-5 text-secondary">Label</dt>
+              <dd class="col-7 mb-2"><span id="variant-pred-sift-label">&mdash;</span></dd>
+              <dt class="col-5 text-secondary">Reason</dt>
+              <dd class="col-7 mb-2"><span id="variant-pred-sift-reason">&mdash;</span></dd>
+              <dt class="col-5 text-secondary">Retrieved</dt>
+              <dd class="col-7 mb-2"><span id="variant-pred-sift-timestamp">&mdash;</span></dd>
+              <dt class="col-5 text-secondary">Source</dt>
+              <dd class="col-7 mb-0"><span id="variant-pred-sift-source">&mdash;</span></dd>
+            </dl>
+          </div>
 
-            <hr class="my-3" />
+          <div class="border rounded-3 p-2 mb-3">
+            <div class="d-flex align-items-baseline justify-content-between gap-2 mb-2">
+              <div class="small fw-semibold">PolyPhen-2</div>
+              <span
+                class="badge text-bg-light border d-inline-flex align-items-center gap-1"
+                data-stage="prediction"
+              >
+                <span aria-hidden="true">&#9432;</span>
+                Stage: <code>prediction</code>
+              </span>
+            </div>
+            <dl class="row small mb-0">
+              <dt class="col-5 text-secondary">Outcome</dt>
+              <dd class="col-7 mb-2"><span id="variant-pred-polyphen2-outcome">&mdash;</span></dd>
+              <dt class="col-5 text-secondary">Score</dt>
+              <dd class="col-7 mb-2"><span id="variant-pred-polyphen2-score">&mdash;</span></dd>
+              <dt class="col-5 text-secondary">Label</dt>
+              <dd class="col-7 mb-2"><span id="variant-pred-polyphen2-label">&mdash;</span></dd>
+              <dt class="col-5 text-secondary">Reason</dt>
+              <dd class="col-7 mb-2"><span id="variant-pred-polyphen2-reason">&mdash;</span></dd>
+              <dt class="col-5 text-secondary">Retrieved</dt>
+              <dd class="col-7 mb-2"><span id="variant-pred-polyphen2-timestamp">&mdash;</span></dd>
+              <dt class="col-5 text-secondary">Source</dt>
+              <dd class="col-7 mb-0"><span id="variant-pred-polyphen2-source">&mdash;</span></dd>
+            </dl>
+          </div>
 
-            <section aria-labelledby="variant-pre-annotation-heading">
-              <div class="d-flex align-items-baseline justify-content-between gap-2">
-                <h3 id="variant-pre-annotation-heading" class="h6 mb-1">Pre-annotation</h3>
-                <span class="badge text-bg-light border">Produced by stage: <code>pre_annotation</code></span>
-              </div>
-              <dl class="row gy-1 small mb-0">
-                <dt class="col-5 text-secondary">Base change</dt>
-                <dd class="col-7 mb-0"><code id="variant-pre-base-change">&mdash;</code></dd>
+          <div class="border rounded-3 p-2">
+            <div class="d-flex align-items-baseline justify-content-between gap-2 mb-2">
+              <div class="small fw-semibold">AlphaMissense</div>
+              <span
+                class="badge text-bg-light border d-inline-flex align-items-center gap-1"
+                data-stage="prediction"
+              >
+                <span aria-hidden="true">&#9432;</span>
+                Stage: <code>prediction</code>
+              </span>
+            </div>
+            <dl class="row small mb-0">
+              <dt class="col-5 text-secondary">Outcome</dt>
+              <dd class="col-7 mb-2"><span id="variant-pred-alphamissense-outcome">&mdash;</span></dd>
+              <dt class="col-5 text-secondary">Score</dt>
+              <dd class="col-7 mb-2"><span id="variant-pred-alphamissense-score">&mdash;</span></dd>
+              <dt class="col-5 text-secondary">Label</dt>
+              <dd class="col-7 mb-2"><span id="variant-pred-alphamissense-label">&mdash;</span></dd>
+              <dt class="col-5 text-secondary">Reason</dt>
+              <dd class="col-7 mb-2"><span id="variant-pred-alphamissense-reason">&mdash;</span></dd>
+              <dt class="col-5 text-secondary">Retrieved</dt>
+              <dd class="col-7 mb-2"><span id="variant-pred-alphamissense-timestamp">&mdash;</span></dd>
+              <dt class="col-5 text-secondary">Source</dt>
+              <dd class="col-7 mb-0"><span id="variant-pred-alphamissense-source">&mdash;</span></dd>
+            </dl>
+          </div>
+        </div>
 
-                <dt class="col-5 text-secondary">Substitution class</dt>
-                <dd class="col-7 mb-0"><code id="variant-pre-substitution-class">&mdash;</code></dd>
+        <div class="mb-2">
+          <div class="d-flex align-items-baseline justify-content-between gap-2 mb-2">
+            <div class="small fw-semibold">Evidence annotation</div>
+            <span class="badge text-bg-light border">Produced by stage: <code>annotation</code></span>
+          </div>
+          <div id="variant-evidence-message" class="small text-secondary mb-2" role="status" aria-live="polite"></div>
 
-                <dt class="col-5 text-secondary">Ref class</dt>
-                <dd class="col-7 mb-0"><code id="variant-pre-ref-class">&mdash;</code></dd>
+          <div class="border rounded-3 p-2 mb-3">
+            <div class="d-flex align-items-baseline justify-content-between gap-2 mb-2">
+              <div class="small fw-semibold">dbSNP</div>
+              <span
+                class="badge text-bg-light border d-inline-flex align-items-center gap-1"
+                data-stage="annotation"
+              >
+                <span aria-hidden="true">&#9432;</span>
+                Stage: <code>annotation</code>
+              </span>
+            </div>
+            <dl class="row small mb-0">
+              <dt class="col-5 text-secondary">Outcome</dt>
+              <dd class="col-7 mb-2"><span id="variant-ev-dbsnp-outcome">&mdash;</span></dd>
+              <dt class="col-5 text-secondary">Completeness</dt>
+              <dd class="col-7 mb-2"><span id="variant-ev-dbsnp-completeness">&mdash;</span></dd>
+              <dt class="col-5 text-secondary">rsID</dt>
+              <dd class="col-7 mb-2"><span id="variant-ev-dbsnp-rsid">&mdash;</span></dd>
+              <dt class="col-5 text-secondary">Reason</dt>
+              <dd class="col-7 mb-2"><span id="variant-ev-dbsnp-reason">&mdash;</span></dd>
+              <dt class="col-5 text-secondary">Retrieved</dt>
+              <dd class="col-7 mb-2"><span id="variant-ev-dbsnp-timestamp">&mdash;</span></dd>
+              <dt class="col-5 text-secondary">Source</dt>
+              <dd class="col-7 mb-0"><span id="variant-ev-dbsnp-source">&mdash;</span></dd>
+            </dl>
+          </div>
 
-                <dt class="col-5 text-secondary">Alt class</dt>
-                <dd class="col-7 mb-0"><code id="variant-pre-alt-class">&mdash;</code></dd>
-              </dl>
-            </section>
+          <div class="border rounded-3 p-2 mb-3">
+            <div class="d-flex align-items-baseline justify-content-between gap-2 mb-2">
+              <div class="small fw-semibold">ClinVar</div>
+              <span
+                class="badge text-bg-light border d-inline-flex align-items-center gap-1"
+                data-stage="annotation"
+              >
+                <span aria-hidden="true">&#9432;</span>
+                Stage: <code>annotation</code>
+              </span>
+            </div>
+            <dl class="row small mb-0">
+              <dt class="col-5 text-secondary">Outcome</dt>
+              <dd class="col-7 mb-2"><span id="variant-ev-clinvar-outcome">&mdash;</span></dd>
+              <dt class="col-5 text-secondary">Completeness</dt>
+              <dd class="col-7 mb-2"><span id="variant-ev-clinvar-completeness">&mdash;</span></dd>
+              <dt class="col-5 text-secondary">ClinVar ID</dt>
+              <dd class="col-7 mb-2"><span id="variant-ev-clinvar-id">&mdash;</span></dd>
+              <dt class="col-5 text-secondary">Clinical significance</dt>
+              <dd class="col-7 mb-2"><span id="variant-ev-clinvar-significance">&mdash;</span></dd>
+              <dt class="col-5 text-secondary">Reason</dt>
+              <dd class="col-7 mb-2"><span id="variant-ev-clinvar-reason">&mdash;</span></dd>
+              <dt class="col-5 text-secondary">Retrieved</dt>
+              <dd class="col-7 mb-2"><span id="variant-ev-clinvar-timestamp">&mdash;</span></dd>
+              <dt class="col-5 text-secondary">Source</dt>
+              <dd class="col-7 mb-0"><span id="variant-ev-clinvar-source">&mdash;</span></dd>
+            </dl>
+          </div>
 
-            <hr class="my-3" />
-
-            <section aria-labelledby="variant-classification-heading">
-              <div class="d-flex align-items-baseline justify-content-between gap-2">
-                <h3 id="variant-classification-heading" class="h6 mb-1">Classification</h3>
-                <span class="badge text-bg-light border">Produced by stage: <code>classification</code></span>
-              </div>
-              <dl class="row gy-1 small mb-0">
-                <dt class="col-5 text-secondary">Consequence category</dt>
-                <dd class="col-7 mb-0"><code id="variant-cls-category">&mdash;</code></dd>
-
-                <dt class="col-5 text-secondary">Reason</dt>
-                <dd class="col-7 mb-0" id="variant-cls-reason">&mdash;</dd>
-              </dl>
-            </section>
-
-            <hr class="my-3" />
-
-            <section aria-labelledby="variant-predictions-heading">
-              <div class="d-flex align-items-baseline justify-content-between gap-2">
-                <h3 id="variant-predictions-heading" class="h6 mb-1">Predictions</h3>
-                <span class="badge text-bg-light border">Produced by stage: <code>prediction</code></span>
-              </div>
-              <div class="small text-secondary mb-2">
-                Predictor outputs are supportive evidence, not diagnosis.
-              </div>
-              <div
-                id="variant-predictions-message"
-                class="small text-secondary"
-                role="status"
-                aria-live="polite"
-              ></div>
-
-              <div class="mt-3">
-                <h4 class="h6 mb-2">SIFT</h4>
-                <dl class="row gy-1 small mb-0" id="variant-pred-sift">
-                  <dt class="col-5 text-secondary">Outcome</dt>
-                  <dd class="col-7 mb-0"><code id="variant-pred-sift-outcome">&mdash;</code></dd>
-
-                  <dt class="col-5 text-secondary">Score</dt>
-                  <dd class="col-7 mb-0"><code id="variant-pred-sift-score">&mdash;</code></dd>
-
-                  <dt class="col-5 text-secondary">Label</dt>
-                  <dd class="col-7 mb-0"><code id="variant-pred-sift-label">&mdash;</code></dd>
-
-                  <dt class="col-5 text-secondary">Reason</dt>
-                  <dd class="col-7 mb-0" id="variant-pred-sift-reason">&mdash;</dd>
-
-                  <dt class="col-5 text-secondary">Timestamp</dt>
-                  <dd class="col-7 mb-0"><code id="variant-pred-sift-timestamp">&mdash;</code></dd>
-
-                  <dt class="col-5 text-secondary">Source</dt>
-                  <dd class="col-7 mb-0"><code id="variant-pred-sift-source">&mdash;</code></dd>
-                </dl>
-              </div>
-
-              <div class="mt-3">
-                <h4 class="h6 mb-2">PolyPhen-2</h4>
-                <dl class="row gy-1 small mb-0" id="variant-pred-polyphen2">
-                  <dt class="col-5 text-secondary">Outcome</dt>
-                  <dd class="col-7 mb-0"><code id="variant-pred-polyphen2-outcome">&mdash;</code></dd>
-
-                  <dt class="col-5 text-secondary">Score</dt>
-                  <dd class="col-7 mb-0"><code id="variant-pred-polyphen2-score">&mdash;</code></dd>
-
-                  <dt class="col-5 text-secondary">Label</dt>
-                  <dd class="col-7 mb-0"><code id="variant-pred-polyphen2-label">&mdash;</code></dd>
-
-                  <dt class="col-5 text-secondary">Reason</dt>
-                  <dd class="col-7 mb-0" id="variant-pred-polyphen2-reason">&mdash;</dd>
-
-                  <dt class="col-5 text-secondary">Timestamp</dt>
-                  <dd class="col-7 mb-0"><code id="variant-pred-polyphen2-timestamp">&mdash;</code></dd>
-
-                  <dt class="col-5 text-secondary">Source</dt>
-                  <dd class="col-7 mb-0"><code id="variant-pred-polyphen2-source">&mdash;</code></dd>
-                </dl>
-              </div>
-
-              <div class="mt-3">
-                <h4 class="h6 mb-2">AlphaMissense</h4>
-                <dl class="row gy-1 small mb-0" id="variant-pred-alphamissense">
-                  <dt class="col-5 text-secondary">Outcome</dt>
-                  <dd class="col-7 mb-0"><code id="variant-pred-alphamissense-outcome">&mdash;</code></dd>
-
-                  <dt class="col-5 text-secondary">Score</dt>
-                  <dd class="col-7 mb-0"><code id="variant-pred-alphamissense-score">&mdash;</code></dd>
-
-                  <dt class="col-5 text-secondary">Label</dt>
-                  <dd class="col-7 mb-0"><code id="variant-pred-alphamissense-label">&mdash;</code></dd>
-
-                  <dt class="col-5 text-secondary">Reason</dt>
-                  <dd class="col-7 mb-0" id="variant-pred-alphamissense-reason">&mdash;</dd>
-
-                  <dt class="col-5 text-secondary">Timestamp</dt>
-                  <dd class="col-7 mb-0"><code id="variant-pred-alphamissense-timestamp">&mdash;</code></dd>
-
-                  <dt class="col-5 text-secondary">Source</dt>
-                  <dd class="col-7 mb-0"><code id="variant-pred-alphamissense-source">&mdash;</code></dd>
-                </dl>
-              </div>
-            </section>
+          <div class="border rounded-3 p-2">
+            <div class="d-flex align-items-baseline justify-content-between gap-2 mb-2">
+              <div class="small fw-semibold">gnomAD</div>
+              <span
+                class="badge text-bg-light border d-inline-flex align-items-center gap-1"
+                data-stage="annotation"
+              >
+                <span aria-hidden="true">&#9432;</span>
+                Stage: <code>annotation</code>
+              </span>
+            </div>
+            <dl class="row small mb-0">
+              <dt class="col-5 text-secondary">Outcome</dt>
+              <dd class="col-7 mb-2"><span id="variant-ev-gnomad-outcome">&mdash;</span></dd>
+              <dt class="col-5 text-secondary">Completeness</dt>
+              <dd class="col-7 mb-2"><span id="variant-ev-gnomad-completeness">&mdash;</span></dd>
+              <dt class="col-5 text-secondary">Variant ID</dt>
+              <dd class="col-7 mb-2"><span id="variant-ev-gnomad-id">&mdash;</span></dd>
+              <dt class="col-5 text-secondary">Global AF</dt>
+              <dd class="col-7 mb-2"><span id="variant-ev-gnomad-af">&mdash;</span></dd>
+              <dt class="col-5 text-secondary">Reason</dt>
+              <dd class="col-7 mb-2"><span id="variant-ev-gnomad-reason">&mdash;</span></dd>
+              <dt class="col-5 text-secondary">Retrieved</dt>
+              <dd class="col-7 mb-2"><span id="variant-ev-gnomad-timestamp">&mdash;</span></dd>
+              <dt class="col-5 text-secondary">Source</dt>
+              <dd class="col-7 mb-0"><span id="variant-ev-gnomad-source">&mdash;</span></dd>
+            </dl>
           </div>
         </div>
       </div>
     </div>
-  </div>
 
   <script src="{{ url_for('static', filename='run_controls.js') }}"></script>
   <script src="{{ url_for('static', filename='upload_controls.js') }}"></script>
   <script src="{{ url_for('static', filename='results_controls.js') }}"></script>
 {% endblock %}
+
+

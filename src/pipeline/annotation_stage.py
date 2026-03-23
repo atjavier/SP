@@ -3,7 +3,10 @@ from __future__ import annotations
 import os
 import shlex
 import subprocess
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
+from urllib.error import HTTPError, URLError
+from urllib.request import Request, urlopen
 
 from pipeline.clinvar_client import ClinvarConfig, fetch_clinvar_evidence_for_variant
 from pipeline.dbsnp_client import DbsnpConfig, fetch_dbsnp_evidence_for_variant
@@ -20,6 +23,7 @@ from storage.db import init_schema as _init_schema
 from storage.clinvar_evidence import clear_clinvar_evidence_for_run, upsert_clinvar_evidence_for_run
 from storage.dbsnp_evidence import clear_dbsnp_evidence_for_run, upsert_dbsnp_evidence_for_run
 from storage.gnomad_evidence import clear_gnomad_evidence_for_run, upsert_gnomad_evidence_for_run
+from storage.runs import update_run_evidence_mode_decision
 from storage.run_artifacts import ensure_run_artifacts_dir
 from storage.stages import (
     mark_stage_canceled,
@@ -31,11 +35,21 @@ from storage.variants import iter_variants_for_run_with_ids
 
 _VALID_EVIDENCE_POLICIES: frozenset[str] = frozenset({"stop", "continue"})
 _VALID_EVIDENCE_PROFILES: frozenset[str] = frozenset({"full", "minimum_exome", "predictor_only"})
+_ENFORCED_EVIDENCE_PROFILE = "predictor_only"
 _VALID_EVIDENCE_MODES: frozenset[str] = frozenset({"online", "offline", "hybrid"})
+_EVIDENCE_SOURCES: tuple[str, ...] = ("dbsnp", "clinvar", "gnomad")
+_NO_VALID_SOURCE_REASONS: frozenset[str] = frozenset(
+    {
+        "requested_online_no_valid_source",
+        "requested_offline_no_valid_source",
+        "requested_hybrid_no_valid_source",
+    }
+)
 _EXOME_PROFILE_ALLOWED_CATEGORIES: frozenset[str] = frozenset(
     {"synonymous", "missense", "nonsense"}
 )
 _PREDICTOR_PROFILE_ALLOWED_CATEGORIES: frozenset[str] = frozenset({"missense"})
+_VALID_VCF_SUFFIXES: tuple[str, ...] = (".vcf", ".vcf.gz", ".vcf.bgz")
 
 
 def _get_run_status(conn, run_id: str) -> str | None:
@@ -87,6 +101,83 @@ def _positive_float_env(name: str, default: float) -> float:
     if value < 0:
         return default
     return value
+
+
+def _max_workers_env(name: str, default: int = 1) -> int:
+    raw = (os.environ.get(name) or "").strip()
+    if not raw:
+        return max(1, int(default))
+    try:
+        value = int(raw)
+    except ValueError:
+        return max(1, int(default))
+    return max(1, value)
+
+
+def _collect_evidence_results(
+    *,
+    db_path: str,
+    conn,
+    run_id: str,
+    uploaded_at: str,
+    variants: list[dict],
+    evidence_profile: str,
+    categories_by_variant: dict,
+    max_workers: int,
+    fetch_fn,
+) -> tuple[list[tuple[dict, dict]], int]:
+    eligible: list[dict] = []
+    skipped = 0
+    for variant in variants:
+        _ensure_annotation_not_canceled(
+            db_path,
+            conn,
+            run_id,
+            uploaded_at=uploaded_at,
+        )
+        if not _is_variant_in_evidence_scope(
+            evidence_profile=evidence_profile,
+            variant_id=variant.get("variant_id"),
+            categories_by_variant=categories_by_variant,
+        ):
+            skipped += 1
+            continue
+        eligible.append(variant)
+
+    results: list[tuple[dict, dict]] = []
+    if max_workers <= 1 or len(eligible) <= 1:
+        for variant in eligible:
+            _ensure_annotation_not_canceled(
+                db_path,
+                conn,
+                run_id,
+                uploaded_at=uploaded_at,
+            )
+            results.append((variant, fetch_fn(variant)))
+        return results, skipped
+
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        future_to_variant = {executor.submit(fetch_fn, variant): variant for variant in eligible}
+        for future in as_completed(future_to_variant):
+            _ensure_annotation_not_canceled(
+                db_path,
+                conn,
+                run_id,
+                uploaded_at=uploaded_at,
+            )
+            variant = future_to_variant[future]
+            try:
+                result = future.result()
+            except Exception as exc:  # noqa: BLE001
+                result = {
+                    "outcome": "error",
+                    "reason_code": "REQUEST_ERROR",
+                    "reason_message": f"Evidence request failed unexpectedly: {exc}",
+                    "details": {"error": str(exc)},
+                }
+            results.append((variant, result))
+
+    return results, skipped
 
 
 def _dbsnp_config(reference_build: str | None) -> DbsnpConfig:
@@ -192,23 +283,127 @@ def _annotation_fail_on_evidence_error(evidence_failure_policy: str | None = Non
     return _resolve_annotation_evidence_policy(evidence_failure_policy) == "stop"
 
 
-def _evidence_failure_details(details: dict, *, failed_source: str, policy: str) -> dict:
+def _safe_non_negative_int(value: object) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return 0
+    if parsed < 0:
+        return 0
+    return parsed
+
+
+def _source_completeness_from_stats(stats: dict, source_key: str) -> tuple[str, str]:
+    enabled = stats.get(f"{source_key}_enabled")
+    if enabled is False:
+        return ("unavailable", "disabled")
+
+    eligible = _safe_non_negative_int(stats.get(f"{source_key}_variants_eligible"))
+    skipped = _safe_non_negative_int(stats.get(f"{source_key}_skipped_out_of_scope"))
+    found = _safe_non_negative_int(stats.get(f"{source_key}_found"))
+    not_found = _safe_non_negative_int(stats.get(f"{source_key}_not_found"))
+    errors = _safe_non_negative_int(stats.get(f"{source_key}_errors"))
+    resolved = found + not_found
+
+    if errors > 0 and resolved > 0:
+        return ("partial", "errors_present")
+    if errors > 0:
+        return ("unavailable", "errors_only")
+    if eligible <= 0:
+        return ("unavailable", "no_eligible_variants")
+    return ("complete", "evidence_available")
+
+
+def _compute_evidence_completeness_from_stats(stats: dict) -> tuple[dict[str, str], dict[str, str], str]:
+    source_completeness: dict[str, str] = {}
+    source_reasons: dict[str, str] = {}
+    for source in _EVIDENCE_SOURCES:
+        completeness, reason = _source_completeness_from_stats(stats, source)
+        source_completeness[source] = completeness
+        source_reasons[source] = reason
+
+    values = list(source_completeness.values())
+    if any(value == "partial" for value in values):
+        aggregate = "partial"
+    elif all(value == "complete" for value in values):
+        aggregate = "complete"
+    elif any(value == "complete" for value in values):
+        aggregate = "partial"
+    else:
+        aggregate = "unavailable"
+
+    return source_completeness, source_reasons, aggregate
+
+
+def _augment_stats_with_evidence_completeness(stats: dict) -> None:
+    source_completeness, source_reasons, aggregate = _compute_evidence_completeness_from_stats(stats)
+    stats["evidence_source_completeness"] = source_completeness
+    stats["evidence_source_completeness_reason"] = source_reasons
+    stats["annotation_evidence_completeness"] = aggregate
+    stats["evidence_complete_sources"] = [s for s in _EVIDENCE_SOURCES if source_completeness.get(s) == "complete"]
+    stats["evidence_partial_sources"] = [s for s in _EVIDENCE_SOURCES if source_completeness.get(s) == "partial"]
+    stats["evidence_unavailable_sources"] = [
+        s for s in _EVIDENCE_SOURCES if source_completeness.get(s) == "unavailable"
+    ]
+
+
+def _evidence_failure_details(
+    details: dict,
+    *,
+    failed_source: str,
+    policy: str,
+    processed_source_states: dict[str, tuple[str, str]] | None = None,
+) -> dict:
     merged = dict(details or {})
     merged["failed_source"] = failed_source
-    merged["missing_outputs"] = ["dbsnp", "clinvar", "gnomad"]
+    processed_states = dict(processed_source_states or {})
+
+    if failed_source in _EVIDENCE_SOURCES:
+        failed_index = _EVIDENCE_SOURCES.index(failed_source)
+        downstream_sources = list(_EVIDENCE_SOURCES[failed_index + 1 :])
+    else:
+        downstream_sources = []
+
+    missing_outputs = [failed_source] + [s for s in downstream_sources if s != failed_source]
+    source_completeness: dict[str, str] = {}
+    source_reasons: dict[str, str] = {}
+    for source in _EVIDENCE_SOURCES:
+        if source == failed_source:
+            source_completeness[source] = "unavailable"
+            source_reasons[source] = "failed_source_error"
+        elif source in downstream_sources:
+            source_completeness[source] = "unavailable"
+            source_reasons[source] = "not_executed_due_failure"
+        else:
+            source_completeness[source] = "unavailable"
+            source_reasons[source] = "unavailable_before_failure"
+
+    for source, source_state in processed_states.items():
+        if source not in _EVIDENCE_SOURCES:
+            continue
+        if source == failed_source or source in downstream_sources:
+            continue
+        completeness = str((source_state or ("unavailable", ""))[0] or "unavailable").strip().lower()
+        if completeness not in {"complete", "partial", "unavailable"}:
+            completeness = "unavailable"
+        reason = str((source_state or ("", ""))[1] or "").strip() or "completed_before_failure"
+        source_completeness[source] = completeness
+        source_reasons[source] = reason
+
+    has_any_available = any(
+        source_completeness.get(source) in {"complete", "partial"} for source in _EVIDENCE_SOURCES
+    )
+    merged["missing_outputs"] = missing_outputs
     merged["annotation_evidence_policy"] = policy
+    merged["evidence_source_completeness"] = source_completeness
+    merged["evidence_source_completeness_reason"] = source_reasons
+    merged["annotation_evidence_completeness"] = "partial" if has_any_available else "unavailable"
     return merged
 
 
 def _resolve_evidence_profile() -> str:
-    raw = (os.environ.get("SP_EVIDENCE_PROFILE") or "").strip().lower()
-    if raw == "online":
-        return "full"
-    if raw in {"missense_only", "prediction_only"}:
-        return "predictor_only"
-    if raw in _VALID_EVIDENCE_PROFILES:
-        return raw
-    return "full"
+    # Evidence annotation is enforced as missense-only; ignore env overrides.
+    return _ENFORCED_EVIDENCE_PROFILE
 
 
 def _resolve_evidence_mode() -> str:
@@ -218,6 +413,293 @@ def _resolve_evidence_mode() -> str:
     if raw in _VALID_EVIDENCE_MODES:
         return raw
     return "online"
+
+
+def _probe_connectivity_enabled() -> bool:
+    raw = os.environ.get("SP_EVIDENCE_CONNECTIVITY_PROBE_ENABLED")
+    if raw is None:
+        return True
+    return _truthy_env("SP_EVIDENCE_CONNECTIVITY_PROBE_ENABLED")
+
+
+def _probe_timeout_seconds() -> float:
+    timeout = _positive_float_env("SP_EVIDENCE_CONNECTIVITY_PROBE_TIMEOUT_SECONDS", 1.5)
+    return max(0.2, timeout)
+
+
+def _probe_max_attempts() -> int:
+    return max(1, _positive_int_env("SP_EVIDENCE_CONNECTIVITY_PROBE_MAX_ATTEMPTS", 1))
+
+
+def _probe_http_base_url(url: str, *, timeout_seconds: float, max_attempts: int) -> bool:
+    if not url:
+        return False
+
+    for attempt in range(max_attempts):
+        del attempt
+        for method in ("HEAD", "GET"):
+            req = Request(url, method=method, headers={"User-Agent": "SP/annotation-probe"})
+            try:
+                with urlopen(req, timeout=timeout_seconds) as resp:
+                    status = int(getattr(resp, "status", 200) or 200)
+                    if status < 500:
+                        return True
+            except HTTPError as exc:
+                if 400 <= int(exc.code) < 500:
+                    return True
+                continue
+            except (TimeoutError, URLError, OSError):
+                continue
+            except Exception:
+                continue
+    return False
+
+
+def _local_source_scan_max_files() -> int:
+    return max(100, _positive_int_env("SP_EVIDENCE_LOCAL_SCAN_MAX_FILES", 2000))
+
+
+def _local_source_scan_max_depth() -> int:
+    return max(0, _positive_int_env("SP_EVIDENCE_LOCAL_SCAN_MAX_DEPTH", 4))
+
+
+def _is_indexed_vcf_candidate(path: str) -> bool:
+    lowered = path.lower()
+    if lowered.endswith(".tbi") or lowered.endswith(".csi"):
+        return False
+    if not lowered.endswith(_VALID_VCF_SUFFIXES):
+        return False
+    # Local evidence readers depend on compressed VCF + tabix/csi index.
+    if lowered.endswith(".vcf"):
+        return False
+    return True
+
+
+def _has_vcf_index(path: str) -> bool:
+    return os.path.isfile(f"{path}.tbi") or os.path.isfile(f"{path}.csi")
+
+
+def _local_vcf_source_state(local_vcf_path: str | None) -> dict[str, object]:
+    raw_path = str(local_vcf_path or "").strip()
+    if not raw_path:
+        return {"configured": False, "ready": False, "reason": "not_configured"}
+
+    if os.path.isfile(raw_path):
+        if not _is_indexed_vcf_candidate(raw_path):
+            return {"configured": True, "ready": False, "reason": "unsupported_path"}
+        if not _has_vcf_index(raw_path):
+            return {"configured": True, "ready": False, "reason": "index_missing"}
+        return {"configured": True, "ready": True, "reason": "ready"}
+
+    if not os.path.isdir(raw_path):
+        return {"configured": True, "ready": False, "reason": "path_missing"}
+
+    scan_root = os.path.abspath(raw_path)
+    max_files = _local_source_scan_max_files()
+    max_depth = _local_source_scan_max_depth()
+    scanned_files = 0
+
+    for root, dirs, files in os.walk(scan_root, topdown=True):
+        rel = os.path.relpath(root, scan_root)
+        depth = 0 if rel == "." else rel.count(os.sep) + 1
+        if depth >= max_depth:
+            dirs[:] = []
+        for name in files:
+            scanned_files += 1
+            if scanned_files > max_files:
+                return {"configured": True, "ready": False, "reason": "scan_limit_reached"}
+            candidate = os.path.join(root, name)
+            if not _is_indexed_vcf_candidate(candidate):
+                continue
+            if _has_vcf_index(candidate):
+                return {"configured": True, "ready": True, "reason": "ready"}
+    return {"configured": True, "ready": False, "reason": "no_indexed_vcf_found"}
+
+
+def _is_local_vcf_source_ready(local_vcf_path: str | None) -> bool:
+    state = _local_vcf_source_state(local_vcf_path)
+    return bool(state.get("ready"))
+
+
+def _resolve_evidence_mode_decision(
+    *,
+    requested_mode: str,
+    online_available: bool,
+    offline_sources_configured: dict[str, bool],
+    offline_sources_available: dict[str, bool] | None = None,
+    offline_sources_unavailable_reason: dict[str, str] | None = None,
+) -> dict[str, object]:
+    requested = (requested_mode or "").strip().lower()
+    if requested in {"local", "offline_local"}:
+        requested = "offline"
+    if requested not in _VALID_EVIDENCE_MODES:
+        requested = "online"
+
+    normalized_sources = {
+        "dbsnp": bool((offline_sources_configured or {}).get("dbsnp", False)),
+        "clinvar": bool((offline_sources_configured or {}).get("clinvar", False)),
+        "gnomad": bool((offline_sources_configured or {}).get("gnomad", False)),
+    }
+    normalized_available = {
+        "dbsnp": bool((offline_sources_available or normalized_sources).get("dbsnp", False)),
+        "clinvar": bool((offline_sources_available or normalized_sources).get("clinvar", False)),
+        "gnomad": bool((offline_sources_available or normalized_sources).get("gnomad", False)),
+    }
+    normalized_unavailable_reason = {
+        "dbsnp": str((offline_sources_unavailable_reason or {}).get("dbsnp", "") or ""),
+        "clinvar": str((offline_sources_unavailable_reason or {}).get("clinvar", "") or ""),
+        "gnomad": str((offline_sources_unavailable_reason or {}).get("gnomad", "") or ""),
+    }
+    offline_available = any(normalized_available.values())
+    online_ok = bool(online_available)
+
+    if requested == "online":
+        if online_ok:
+            effective = "online"
+            reason = "requested_online_online_available"
+        elif offline_available:
+            effective = "offline"
+            reason = "requested_online_fallback_offline"
+        else:
+            effective = "online"
+            reason = "requested_online_no_valid_source"
+    elif requested == "offline":
+        if offline_available:
+            effective = "offline"
+            reason = "requested_offline_offline_available"
+        elif online_ok:
+            effective = "online"
+            reason = "requested_offline_fallback_online"
+        else:
+            effective = "offline"
+            reason = "requested_offline_no_valid_source"
+    else:  # hybrid
+        if offline_available and online_ok:
+            effective = "hybrid"
+            reason = "requested_hybrid_both_available"
+        elif offline_available:
+            effective = "offline"
+            reason = "requested_hybrid_online_unavailable"
+        elif online_ok:
+            effective = "online"
+            reason = "requested_hybrid_offline_unavailable"
+        else:
+            effective = "hybrid"
+            reason = "requested_hybrid_no_valid_source"
+
+    return {
+        "requested_mode": requested,
+        "effective_mode": effective,
+        "online_available": online_ok,
+        "offline_sources_configured": normalized_sources,
+        "offline_sources_available": normalized_available,
+        "offline_sources_unavailable_reason": normalized_unavailable_reason,
+        "decision_reason": reason,
+        "detected_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+def _detect_evidence_mode_decision(
+    *,
+    requested_mode: str,
+    dbsnp_local_vcf_path: str | None,
+    clinvar_local_vcf_path: str | None,
+    gnomad_local_vcf_path: str | None,
+    dbsnp_enabled: bool,
+    clinvar_enabled: bool,
+    gnomad_enabled: bool,
+) -> dict[str, object]:
+    requested_normalized = (requested_mode or "").strip().lower()
+    if requested_normalized in {"local", "offline_local"}:
+        requested_normalized = "offline"
+    if requested_normalized not in _VALID_EVIDENCE_MODES:
+        requested_normalized = "online"
+
+    dbsnp_local_state = _local_vcf_source_state(dbsnp_local_vcf_path)
+    clinvar_local_state = _local_vcf_source_state(clinvar_local_vcf_path)
+    gnomad_local_state = _local_vcf_source_state(gnomad_local_vcf_path)
+    offline_sources_configured = {
+        "dbsnp": bool(dbsnp_local_state.get("configured")),
+        "clinvar": bool(clinvar_local_state.get("configured")),
+        "gnomad": bool(gnomad_local_state.get("configured")),
+    }
+    offline_sources_available = {
+        "dbsnp": bool(dbsnp_enabled) and bool(dbsnp_local_state.get("ready")),
+        "clinvar": bool(clinvar_enabled) and bool(clinvar_local_state.get("ready")),
+        "gnomad": bool(gnomad_enabled) and bool(gnomad_local_state.get("ready")),
+    }
+    offline_sources_unavailable_reason = {
+        "dbsnp": (
+            str(dbsnp_local_state.get("reason") or "")
+            if offline_sources_configured["dbsnp"] and not bool(dbsnp_local_state.get("ready"))
+            else ""
+        ),
+        "clinvar": (
+            str(clinvar_local_state.get("reason") or "")
+            if offline_sources_configured["clinvar"] and not bool(clinvar_local_state.get("ready"))
+            else ""
+        ),
+        "gnomad": (
+            str(gnomad_local_state.get("reason") or "")
+            if offline_sources_configured["gnomad"] and not bool(gnomad_local_state.get("ready"))
+            else ""
+        ),
+    }
+
+    online_probe_sources = []
+    if dbsnp_enabled:
+        online_probe_sources.append(
+            (os.environ.get("SP_DBSNP_API_BASE_URL") or "").strip() or "https://api.ncbi.nlm.nih.gov/variation/v0"
+        )
+    if clinvar_enabled:
+        online_probe_sources.append(
+            (os.environ.get("SP_CLINVAR_API_BASE_URL") or "").strip()
+            or "https://eutils.ncbi.nlm.nih.gov/entrez/eutils"
+        )
+    if gnomad_enabled:
+        online_probe_sources.append(
+            (os.environ.get("SP_GNOMAD_API_BASE_URL") or "").strip()
+            or "https://gnomad.broadinstitute.org/api"
+        )
+
+    online_available = False
+    should_probe_online = bool(online_probe_sources)
+    if requested_normalized == "offline" and any(offline_sources_available.values()):
+        # Offline request with ready local sources should not be blocked by
+        # extra online probing latency.
+        should_probe_online = False
+
+    if should_probe_online:
+        if not _probe_connectivity_enabled():
+            online_available = True
+        else:
+            timeout_seconds = _probe_timeout_seconds()
+            max_attempts = _probe_max_attempts()
+            for base_url in online_probe_sources:
+                if _probe_http_base_url(base_url, timeout_seconds=timeout_seconds, max_attempts=max_attempts):
+                    online_available = True
+                    break
+
+    return _resolve_evidence_mode_decision(
+        requested_mode=requested_normalized,
+        online_available=online_available,
+        offline_sources_configured=offline_sources_configured,
+        offline_sources_available=offline_sources_available,
+        offline_sources_unavailable_reason=offline_sources_unavailable_reason,
+    )
+
+
+def _enabled_evidence_sources(
+    *,
+    dbsnp_enabled: bool,
+    clinvar_enabled: bool,
+    gnomad_enabled: bool,
+) -> dict[str, bool]:
+    return {
+        "dbsnp": bool(dbsnp_enabled),
+        "clinvar": bool(clinvar_enabled),
+        "gnomad": bool(gnomad_enabled),
+    }
 
 
 def _local_vcf_path(env_name: str) -> str | None:
@@ -250,20 +732,18 @@ def _is_variant_in_evidence_scope(
     variant_id: str | None,
     categories_by_variant: dict[str, str],
 ) -> bool:
-    if evidence_profile == "full":
-        return True
+    if evidence_profile != _ENFORCED_EVIDENCE_PROFILE:
+        evidence_profile = _ENFORCED_EVIDENCE_PROFILE
     key = str(variant_id or "").strip()
     if not key:
-        return True
+        return False
     category = categories_by_variant.get(key)
     if category is None:
-        # Keep behavior safe for runs that have no/partial classification rows.
-        return True
-    if evidence_profile == "minimum_exome":
-        return category in _EXOME_PROFILE_ALLOWED_CATEGORIES
+        # Evidence is missense-only; require classification to be present.
+        return False
     if evidence_profile == "predictor_only":
         return category in _PREDICTOR_PROFILE_ALLOWED_CATEGORIES
-    return True
+    return False
 
 
 def _fetch_dbsnp_evidence(
@@ -590,7 +1070,7 @@ def run_annotation_stage(
     evidence_failure_policy: str | None = None,
 ) -> dict:
     created_at = datetime.now(timezone.utc).isoformat()
-    stats: dict = {"tool": "snpeff", "impl_version": "2026-03-09-r8"}
+    stats: dict = {"tool": "snpeff", "impl_version": "2026-03-10-r9"}
     annotation_evidence_policy = _resolve_annotation_evidence_policy(evidence_failure_policy)
     fail_on_evidence_error = _annotation_fail_on_evidence_error(annotation_evidence_policy)
     stats["annotation_evidence_policy"] = annotation_evidence_policy
@@ -929,25 +1409,181 @@ def run_annotation_stage(
                 stats["snpeff_note"] = "SnpEff is disabled (SP_SNPEFF_ENABLED=0)."
 
             dbsnp_config = _dbsnp_config(reference_build)
+            clinvar_config = _clinvar_config()
+            gnomad_config = _gnomad_config()
             stats["dbsnp_enabled"] = bool(dbsnp_config.enabled)
             stats["dbsnp_timeout_seconds"] = int(dbsnp_config.timeout_seconds)
             stats["dbsnp_retry_max_attempts"] = int(dbsnp_config.retry_max_attempts)
             stats["dbsnp_retry_backoff_base_seconds"] = float(dbsnp_config.retry_backoff_base_seconds)
             stats["dbsnp_retry_backoff_max_seconds"] = float(dbsnp_config.retry_backoff_max_seconds)
             stats["dbsnp_assembly"] = str(dbsnp_config.assembly)
+            stats["clinvar_enabled"] = bool(clinvar_config.enabled)
+            stats["clinvar_timeout_seconds"] = int(clinvar_config.timeout_seconds)
+            stats["clinvar_retry_max_attempts"] = int(clinvar_config.retry_max_attempts)
+            stats["clinvar_retry_backoff_base_seconds"] = float(clinvar_config.retry_backoff_base_seconds)
+            stats["clinvar_retry_backoff_max_seconds"] = float(clinvar_config.retry_backoff_max_seconds)
+            stats["gnomad_enabled"] = bool(gnomad_config.enabled)
+            stats["gnomad_timeout_seconds"] = int(gnomad_config.timeout_seconds)
+            stats["gnomad_retry_max_attempts"] = int(gnomad_config.retry_max_attempts)
+            stats["gnomad_retry_backoff_base_seconds"] = float(gnomad_config.retry_backoff_base_seconds)
+            stats["gnomad_retry_backoff_max_seconds"] = float(gnomad_config.retry_backoff_max_seconds)
+            stats["gnomad_min_request_interval_seconds"] = float(gnomad_config.min_request_interval_seconds)
+            stats["gnomad_dataset_id"] = gnomad_config.dataset_id
+            stats["gnomad_reference_genome"] = gnomad_config.reference_genome
 
             variants = list(iter_variants_for_run_with_ids(db_path, run_id, conn=conn))
             evidence_profile = _resolve_evidence_profile()
-            evidence_mode = _resolve_evidence_mode()
+            evidence_mode_requested = _resolve_evidence_mode()
             dbsnp_local_vcf_path = _local_vcf_path("SP_DBSNP_LOCAL_VCF_PATH")
             clinvar_local_vcf_path = _local_vcf_path("SP_CLINVAR_LOCAL_VCF_PATH")
             gnomad_local_vcf_path = _local_vcf_path("SP_GNOMAD_LOCAL_VCF_PATH")
+            mode_decision = _detect_evidence_mode_decision(
+                requested_mode=evidence_mode_requested,
+                dbsnp_local_vcf_path=dbsnp_local_vcf_path,
+                clinvar_local_vcf_path=clinvar_local_vcf_path,
+                gnomad_local_vcf_path=gnomad_local_vcf_path,
+                dbsnp_enabled=bool(dbsnp_config.enabled),
+                clinvar_enabled=bool(clinvar_config.enabled),
+                gnomad_enabled=bool(gnomad_config.enabled),
+            )
+            evidence_mode = str(mode_decision.get("effective_mode") or evidence_mode_requested)
             categories_by_variant = _get_variant_consequence_categories(conn, run_id)
             stats["evidence_profile"] = evidence_profile
             stats["evidence_mode"] = evidence_mode
-            stats["dbsnp_local_vcf_configured"] = bool(dbsnp_local_vcf_path)
-            stats["clinvar_local_vcf_configured"] = bool(clinvar_local_vcf_path)
-            stats["gnomad_local_vcf_configured"] = bool(gnomad_local_vcf_path)
+            stats["evidence_mode_requested"] = mode_decision.get("requested_mode")
+            stats["evidence_mode_effective"] = mode_decision.get("effective_mode")
+            stats["evidence_online_available"] = bool(mode_decision.get("online_available"))
+            stats["evidence_offline_sources_configured"] = mode_decision.get("offline_sources_configured") or {}
+            stats["evidence_offline_sources_available"] = mode_decision.get("offline_sources_available") or {}
+            stats["evidence_offline_sources_unavailable_reason"] = (
+                mode_decision.get("offline_sources_unavailable_reason") or {}
+            )
+            stats["evidence_mode_decision_reason"] = mode_decision.get("decision_reason")
+            stats["evidence_mode_detected_at"] = mode_decision.get("detected_at")
+            offline_sources = mode_decision.get("offline_sources_configured") or {}
+            offline_available_sources = mode_decision.get("offline_sources_available") or {}
+            stats["dbsnp_local_vcf_configured"] = bool(offline_sources.get("dbsnp"))
+            stats["clinvar_local_vcf_configured"] = bool(offline_sources.get("clinvar"))
+            stats["gnomad_local_vcf_configured"] = bool(offline_sources.get("gnomad"))
+            stats["dbsnp_local_vcf_available"] = bool(offline_available_sources.get("dbsnp"))
+            stats["clinvar_local_vcf_available"] = bool(offline_available_sources.get("clinvar"))
+            stats["gnomad_local_vcf_available"] = bool(offline_available_sources.get("gnomad"))
+            conn.execute("BEGIN IMMEDIATE")
+            update_run_evidence_mode_decision(
+                db_path,
+                run_id,
+                requested_mode=str(mode_decision.get("requested_mode") or evidence_mode_requested),
+                effective_mode=str(mode_decision.get("effective_mode") or evidence_mode),
+                online_available=bool(mode_decision.get("online_available")),
+                offline_sources_configured=mode_decision.get("offline_sources_configured") or {},
+                decision_reason=str(mode_decision.get("decision_reason") or ""),
+                detected_at=mode_decision.get("detected_at"),
+                conn=conn,
+                commit=False,
+            )
+            conn.commit()
+            enabled_sources = _enabled_evidence_sources(
+                dbsnp_enabled=bool(dbsnp_config.enabled),
+                clinvar_enabled=bool(clinvar_config.enabled),
+                gnomad_enabled=bool(gnomad_config.enabled),
+            )
+            required_sources = [source for source in _EVIDENCE_SOURCES if enabled_sources.get(source)]
+            stats["evidence_sources_enabled"] = enabled_sources
+            stats["evidence_required_sources"] = required_sources
+
+            decision_reason = str(mode_decision.get("decision_reason") or "")
+            online_available = bool(mode_decision.get("online_available"))
+            no_offline_available_for_required = bool(required_sources) and all(
+                not bool(offline_available_sources.get(source)) for source in required_sources
+            )
+            no_valid_sources_for_required = (
+                bool(required_sources)
+                and (
+                    decision_reason in _NO_VALID_SOURCE_REASONS
+                    or (not online_available and no_offline_available_for_required)
+                )
+            )
+            if no_valid_sources_for_required:
+                missing_sources = [
+                    source
+                    for source in required_sources
+                    if (not online_available) and (not bool(offline_available_sources.get(source)))
+                ]
+                source_completeness = {}
+                source_completeness_reason = {}
+                for source in _EVIDENCE_SOURCES:
+                    source_completeness[source] = "unavailable"
+                    source_completeness_reason[source] = (
+                        "disabled" if not enabled_sources.get(source) else "no_valid_source"
+                    )
+
+                env_var_by_source = {
+                    "dbsnp": "SP_DBSNP_LOCAL_VCF_PATH",
+                    "clinvar": "SP_CLINVAR_LOCAL_VCF_PATH",
+                    "gnomad": "SP_GNOMAD_LOCAL_VCF_PATH",
+                }
+                local_path_env_vars = [env_var_by_source[source] for source in missing_sources]
+                details = {
+                    "requested_mode": mode_decision.get("requested_mode"),
+                    "effective_mode": mode_decision.get("effective_mode"),
+                    "decision_reason": decision_reason or "no_valid_source",
+                    "online_available": online_available,
+                    "offline_sources_configured": stats.get("evidence_offline_sources_configured") or {},
+                    "offline_sources_available": stats.get("evidence_offline_sources_available") or {},
+                    "offline_sources_unavailable_reason": (
+                        stats.get("evidence_offline_sources_unavailable_reason") or {}
+                    ),
+                    "enabled_sources": enabled_sources,
+                    "required_sources": required_sources,
+                    "missing_sources": missing_sources,
+                    "missing_source_env_vars": local_path_env_vars,
+                    "missing_outputs": [*missing_sources, "reporting"],
+                    "blocked_outputs": ["annotation", "reporting"],
+                    "failed_source": "all_evidence_sources_unavailable",
+                    "annotation_evidence_policy": annotation_evidence_policy,
+                    "annotation_evidence_completeness": "unavailable",
+                    "evidence_source_completeness": source_completeness,
+                    "evidence_source_completeness_reason": source_completeness_reason,
+                    "hint": (
+                        "Neither online evidence APIs nor offline local evidence sources are available. "
+                        "Restore connectivity or configure indexed local VCF paths "
+                        f"({', '.join(local_path_env_vars) if local_path_env_vars else 'for enabled sources'}) and retry."
+                    ),
+                }
+                stats["evidence_failed_sources"] = missing_sources
+                stats["strict_block_reason"] = "no_valid_evidence_sources"
+                stats["strict_missing_sources"] = missing_sources
+                stats["strict_missing_source_env_vars"] = local_path_env_vars
+                stats["strict_blocked_outputs"] = details["blocked_outputs"]
+                stats["annotation_evidence_completeness"] = "unavailable"
+                stats["evidence_source_completeness"] = source_completeness
+                stats["evidence_source_completeness_reason"] = source_completeness_reason
+
+                conn.execute("BEGIN IMMEDIATE")
+                clear_dbsnp_evidence_for_run(db_path, run_id, conn=conn, commit=False)
+                clear_clinvar_evidence_for_run(db_path, run_id, conn=conn, commit=False)
+                clear_gnomad_evidence_for_run(db_path, run_id, conn=conn, commit=False)
+                mark_stage_failed(
+                    db_path,
+                    run_id,
+                    "annotation",
+                    input_uploaded_at=uploaded_at,
+                    error_code="EVIDENCE_SOURCES_UNAVAILABLE",
+                    error_message=(
+                        "Neither online nor offline evidence sources are available for annotation."
+                    ),
+                    error_details=details,
+                    stats=stats,
+                    conn=conn,
+                    commit=False,
+                )
+                conn.commit()
+                raise StageExecutionError(
+                    503,
+                    "EVIDENCE_SOURCES_UNAVAILABLE",
+                    "Neither online nor offline evidence sources are available for annotation.",
+                    details=details,
+                )
             if evidence_profile == "minimum_exome":
                 stats["evidence_profile_scope"] = "coding_only"
                 stats["evidence_profile_allowed_categories"] = sorted(
@@ -970,23 +1606,10 @@ def run_annotation_stage(
             dbsnp_skipped_out_of_scope = 0
 
             if dbsnp_config.enabled:
-                for variant in variants:
-                    _ensure_annotation_not_canceled(
-                        db_path,
-                        conn,
-                        run_id,
-                        uploaded_at=uploaded_at,
-                    )
+                dbsnp_max_workers = _max_workers_env("SP_DBSNP_MAX_WORKERS", 1)
 
-                    if not _is_variant_in_evidence_scope(
-                        evidence_profile=evidence_profile,
-                        variant_id=variant.get("variant_id"),
-                        categories_by_variant=categories_by_variant,
-                    ):
-                        dbsnp_skipped_out_of_scope += 1
-                        continue
-
-                    result = _fetch_dbsnp_evidence(
+                def _fetch_dbsnp_variant(variant: dict) -> dict:
+                    return _fetch_dbsnp_evidence(
                         dbsnp_config,
                         evidence_mode=evidence_mode,
                         local_vcf_path=dbsnp_local_vcf_path,
@@ -995,6 +1618,22 @@ def run_annotation_stage(
                         ref=str(variant.get("ref") or ""),
                         alt=str(variant.get("alt") or ""),
                     )
+
+                dbsnp_results, dbsnp_skipped_out_of_scope = _collect_evidence_results(
+                    db_path=db_path,
+                    conn=conn,
+                    run_id=run_id,
+                    uploaded_at=uploaded_at,
+                    variants=variants,
+                    evidence_profile=evidence_profile,
+                    categories_by_variant=categories_by_variant,
+                    max_workers=dbsnp_max_workers,
+                    fetch_fn=_fetch_dbsnp_variant,
+                )
+
+                stats["dbsnp_max_workers"] = dbsnp_max_workers
+
+                for variant, result in dbsnp_results:
                     retries_used = int(result.get("retry_attempts") or 0)
                     dbsnp_retry_attempts_total += retries_used
                     outcome = str(result.get("outcome") or "error")
@@ -1069,6 +1708,7 @@ def run_annotation_stage(
                             details,
                             failed_source="dbsnp",
                             policy=annotation_evidence_policy,
+                            processed_source_states={},
                         )
                         conn.execute("BEGIN IMMEDIATE")
                         clear_dbsnp_evidence_for_run(db_path, run_id, conn=conn, commit=False)
@@ -1113,12 +1753,6 @@ def run_annotation_stage(
                 stats["dbsnp_variants_eligible"] = 0
                 stats["dbsnp_skipped_out_of_scope"] = 0
 
-            clinvar_config = _clinvar_config()
-            stats["clinvar_enabled"] = bool(clinvar_config.enabled)
-            stats["clinvar_timeout_seconds"] = int(clinvar_config.timeout_seconds)
-            stats["clinvar_retry_max_attempts"] = int(clinvar_config.retry_max_attempts)
-            stats["clinvar_retry_backoff_base_seconds"] = float(clinvar_config.retry_backoff_base_seconds)
-            stats["clinvar_retry_backoff_max_seconds"] = float(clinvar_config.retry_backoff_max_seconds)
             stats["clinvar_variants_processed"] = len(variants)
 
             clinvar_rows: list[dict] = []
@@ -1131,23 +1765,10 @@ def run_annotation_stage(
             clinvar_skipped_out_of_scope = 0
 
             if clinvar_config.enabled:
-                for variant in variants:
-                    _ensure_annotation_not_canceled(
-                        db_path,
-                        conn,
-                        run_id,
-                        uploaded_at=uploaded_at,
-                    )
+                clinvar_max_workers = _max_workers_env("SP_CLINVAR_MAX_WORKERS", 1)
 
-                    if not _is_variant_in_evidence_scope(
-                        evidence_profile=evidence_profile,
-                        variant_id=variant.get("variant_id"),
-                        categories_by_variant=categories_by_variant,
-                    ):
-                        clinvar_skipped_out_of_scope += 1
-                        continue
-
-                    result = _fetch_clinvar_evidence(
+                def _fetch_clinvar_variant(variant: dict) -> dict:
+                    return _fetch_clinvar_evidence(
                         clinvar_config,
                         evidence_mode=evidence_mode,
                         local_vcf_path=clinvar_local_vcf_path,
@@ -1156,6 +1777,22 @@ def run_annotation_stage(
                         ref=str(variant.get("ref") or ""),
                         alt=str(variant.get("alt") or ""),
                     )
+
+                clinvar_results, clinvar_skipped_out_of_scope = _collect_evidence_results(
+                    db_path=db_path,
+                    conn=conn,
+                    run_id=run_id,
+                    uploaded_at=uploaded_at,
+                    variants=variants,
+                    evidence_profile=evidence_profile,
+                    categories_by_variant=categories_by_variant,
+                    max_workers=clinvar_max_workers,
+                    fetch_fn=_fetch_clinvar_variant,
+                )
+
+                stats["clinvar_max_workers"] = clinvar_max_workers
+
+                for variant, result in clinvar_results:
                     retries_used = int(result.get("retry_attempts") or 0)
                     clinvar_retry_attempts_total += retries_used
                     outcome = str(result.get("outcome") or "error")
@@ -1227,10 +1864,14 @@ def run_annotation_stage(
                     stats["clinvar_error_details"] = details
                     stats["clinvar_warning"] = "ClinVar retrieval had one or more errors."
                     if fail_on_evidence_error:
+                        processed_source_states = {
+                            "dbsnp": _source_completeness_from_stats(stats, "dbsnp"),
+                        }
                         details = _evidence_failure_details(
                             details,
                             failed_source="clinvar",
                             policy=annotation_evidence_policy,
+                            processed_source_states=processed_source_states,
                         )
                         conn.execute("BEGIN IMMEDIATE")
                         clear_dbsnp_evidence_for_run(db_path, run_id, conn=conn, commit=False)
@@ -1275,15 +1916,6 @@ def run_annotation_stage(
                 stats["clinvar_variants_eligible"] = 0
                 stats["clinvar_skipped_out_of_scope"] = 0
 
-            gnomad_config = _gnomad_config()
-            stats["gnomad_enabled"] = bool(gnomad_config.enabled)
-            stats["gnomad_timeout_seconds"] = int(gnomad_config.timeout_seconds)
-            stats["gnomad_retry_max_attempts"] = int(gnomad_config.retry_max_attempts)
-            stats["gnomad_retry_backoff_base_seconds"] = float(gnomad_config.retry_backoff_base_seconds)
-            stats["gnomad_retry_backoff_max_seconds"] = float(gnomad_config.retry_backoff_max_seconds)
-            stats["gnomad_min_request_interval_seconds"] = float(gnomad_config.min_request_interval_seconds)
-            stats["gnomad_dataset_id"] = gnomad_config.dataset_id
-            stats["gnomad_reference_genome"] = gnomad_config.reference_genome
             stats["gnomad_variants_processed"] = len(variants)
 
             gnomad_errors: list[dict] = []
@@ -1296,23 +1928,10 @@ def run_annotation_stage(
             gnomad_skipped_out_of_scope = 0
 
             if gnomad_config.enabled:
-                for variant in variants:
-                    _ensure_annotation_not_canceled(
-                        db_path,
-                        conn,
-                        run_id,
-                        uploaded_at=uploaded_at,
-                    )
+                gnomad_max_workers = _max_workers_env("SP_GNOMAD_MAX_WORKERS", 1)
 
-                    if not _is_variant_in_evidence_scope(
-                        evidence_profile=evidence_profile,
-                        variant_id=variant.get("variant_id"),
-                        categories_by_variant=categories_by_variant,
-                    ):
-                        gnomad_skipped_out_of_scope += 1
-                        continue
-
-                    result = _fetch_gnomad_evidence(
+                def _fetch_gnomad_variant(variant: dict) -> dict:
+                    return _fetch_gnomad_evidence(
                         gnomad_config,
                         evidence_mode=evidence_mode,
                         local_vcf_path=gnomad_local_vcf_path,
@@ -1321,6 +1940,22 @@ def run_annotation_stage(
                         ref=str(variant.get("ref") or ""),
                         alt=str(variant.get("alt") or ""),
                     )
+
+                gnomad_results, gnomad_skipped_out_of_scope = _collect_evidence_results(
+                    db_path=db_path,
+                    conn=conn,
+                    run_id=run_id,
+                    uploaded_at=uploaded_at,
+                    variants=variants,
+                    evidence_profile=evidence_profile,
+                    categories_by_variant=categories_by_variant,
+                    max_workers=gnomad_max_workers,
+                    fetch_fn=_fetch_gnomad_variant,
+                )
+
+                stats["gnomad_max_workers"] = gnomad_max_workers
+
+                for variant, result in gnomad_results:
                     retries_used = int(result.get("retry_attempts") or 0)
                     gnomad_retry_attempts_total += retries_used
                     outcome = str(result.get("outcome") or "error")
@@ -1406,10 +2041,15 @@ def run_annotation_stage(
                     stats["gnomad_error_details"] = details
                     stats["gnomad_warning"] = "gnomAD retrieval had one or more errors."
                     if fail_on_evidence_error:
+                        processed_source_states = {
+                            "dbsnp": _source_completeness_from_stats(stats, "dbsnp"),
+                            "clinvar": _source_completeness_from_stats(stats, "clinvar"),
+                        }
                         details = _evidence_failure_details(
                             details,
                             failed_source="gnomad",
                             policy=annotation_evidence_policy,
+                            processed_source_states=processed_source_states,
                         )
                         conn.execute("BEGIN IMMEDIATE")
                         clear_dbsnp_evidence_for_run(db_path, run_id, conn=conn, commit=False)
@@ -1455,6 +2095,7 @@ def run_annotation_stage(
                 stats["gnomad_skipped_out_of_scope"] = 0
 
             stats["evidence_failed_sources"] = sorted(set(failed_sources))
+            _augment_stats_with_evidence_completeness(stats)
             conn.execute("BEGIN IMMEDIATE")
             _ensure_annotation_not_canceled(
                 db_path,

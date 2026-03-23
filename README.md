@@ -45,7 +45,7 @@ Notes:
 - Evidence assets are persisted in Docker volume `evidence-data` under `/opt/evidence`.
 - App data is persisted in Docker volume `instance-data`.
 - Current compose profile enables SnpEff and VEP together.
-- Current compose profile sets `SP_EVIDENCE_PROFILE=predictor_only` for faster pilot/tester runs.
+- Evidence annotation is enforced as missense-only; compose sets `SP_EVIDENCE_PROFILE=predictor_only`.
 - Current compose profile enables local dbSNP + ClinVar install by default.
 - Current compose profile sets `SP_EVIDENCE_MODE=hybrid` (local first, online fallback).
 
@@ -170,14 +170,30 @@ General:
 - `SP_MAX_VCF_DECOMPRESSED_BYTES` (default: `262144000`)
 - `SP_WAITRESS_THREADS` (default: `16`)
 - `SECRET_KEY` (recommended for stable sessions)
-- `SP_EVIDENCE_PROFILE` (default: `full`)
-  - `full`: evidence lookups run for all variants.
-  - `minimum_exome`: evidence lookups run only for coding-classified variants (`synonymous`, `missense`, `nonsense`).
-  - `predictor_only`: evidence lookups run only for predictor-routed variants (`missense`).
+- `SP_EVIDENCE_PROFILE` (forced to `predictor_only`)
+  - Evidence annotation is enforced as missense-only; profile settings are ignored.
 - `SP_EVIDENCE_MODE` (default: `online`)
   - `online`: remote APIs only
   - `offline`: local VCF/tabix databases only
   - `hybrid`: local first, fallback to online on local errors
+- Evidence mode decision telemetry is persisted per run:
+  - `evidence_mode_requested`
+  - `evidence_mode_effective`
+  - `evidence_online_available`
+  - `evidence_offline_sources_configured` (`dbsnp|clinvar|gnomad`, path configured)
+  - `evidence_mode_decision_reason`
+  - `evidence_mode_detected_at`
+- Additional per-source readiness diagnostics are emitted in annotation stage stats:
+  - `evidence_offline_sources_available`
+  - `evidence_offline_sources_unavailable_reason`
+- Connectivity probe tuning:
+  - `SP_EVIDENCE_CONNECTIVITY_PROBE_ENABLED` (default: `1`)
+  - `SP_EVIDENCE_CONNECTIVITY_PROBE_TIMEOUT_SECONDS` (default: `1.5`)
+  - `SP_EVIDENCE_CONNECTIVITY_PROBE_MAX_ATTEMPTS` (default: `1`)
+- Strict no-valid-source blocking:
+  - If enabled evidence sources have no valid retrieval path (online unavailable and no offline-ready local sources), annotation fails with `EVIDENCE_SOURCES_UNAVAILABLE`.
+  - Failure details include `missing_sources`, `missing_outputs`, `blocked_outputs`, mode-decision fields/maps, and remediation `hint`.
+  - Reporting remains `queued` for that upload because annotation did not complete successfully.
 
 Local `.env` support:
 - Create `.env` at repo root (see `.env.example`).
@@ -204,6 +220,7 @@ VEP:
 - `SP_VEP_FASTA_PATH`
 - `SP_VEP_ASSEMBLY` (default: `GRCh38`)
 - `SP_VEP_TIMEOUT_SECONDS` (default: `1200`)
+- `SP_VEP_BATCH_SIZE` (default: `20000`, set to `0` to disable)
 - `SP_VEP_EXTRA_ARGS`
 
 dbSNP:
@@ -213,6 +230,7 @@ dbSNP:
 - `SP_DBSNP_RETRY_MAX_ATTEMPTS` (default: `3`)
 - `SP_DBSNP_RETRY_BACKOFF_BASE_SECONDS` (default: `0.5`)
 - `SP_DBSNP_RETRY_BACKOFF_MAX_SECONDS` (default: `8`)
+- `SP_DBSNP_MAX_WORKERS` (default: `1`)
 - `SP_DBSNP_API_KEY` (optional)
 - `SP_DBSNP_ASSEMBLY` (default: `GRCh38`)
 - `SP_DBSNP_LOCAL_VCF_PATH` (optional local/offline mode path)
@@ -224,6 +242,7 @@ ClinVar:
 - `SP_CLINVAR_RETRY_MAX_ATTEMPTS` (default: `3`)
 - `SP_CLINVAR_RETRY_BACKOFF_BASE_SECONDS` (default: `0.5`)
 - `SP_CLINVAR_RETRY_BACKOFF_MAX_SECONDS` (default: `8`)
+- `SP_CLINVAR_MAX_WORKERS` (default: `1`)
 - `SP_CLINVAR_API_KEY` (optional)
 - `SP_CLINVAR_LOCAL_VCF_PATH` (optional local/offline mode path)
 
@@ -237,6 +256,7 @@ gnomAD:
 - `SP_GNOMAD_RETRY_BACKOFF_BASE_SECONDS` (default: `0.5`)
 - `SP_GNOMAD_RETRY_BACKOFF_MAX_SECONDS` (default: `8`)
 - `SP_GNOMAD_MIN_REQUEST_INTERVAL_SECONDS` (default: `1.0`)
+- `SP_GNOMAD_MAX_WORKERS` (default: `1`)
 - Local gnomAD DB install is intentionally not part of this project's default setup due size constraints.
 
 Evidence profile behavior:
@@ -251,11 +271,27 @@ Local evidence behavior:
 - In `offline` mode, dbSNP/ClinVar lookups use local VCF/tabix sources.
 - In `hybrid` mode, dbSNP/ClinVar use local-first with online fallback on local errors.
 - dbSNP local lookup now normalizes chromosome aliases and also tries RefSeq contigs (for example `NC_000001.11`) to match NCBI dbSNP VCF naming.
+- Variant Details -> Evidence now shows source provenance as `source (source_mode)` when available (for example `dbsnp (offline_local)`).
 - Project default keeps gnomAD online-only due dataset size constraints.
+
+Evidence mode decision behavior:
+- Decision runs during annotation preflight and is shown in Progress.
+- Requested `online`:
+  - online available => effective `online`
+  - online unavailable + offline configured => effective `offline`
+- Requested `offline`:
+  - offline configured => effective `offline`
+  - offline unavailable + online available => effective `online`
+- Requested `hybrid`:
+  - both available => effective `hybrid`
+  - only one available => effective `offline` or `online`
+- If neither path is available, annotation hard-fails with `EVIDENCE_SOURCES_UNAVAILABLE` and downstream annotation-dependent outputs remain blocked.
+- `configured` means a local source path was provided.
+- `available` means the configured local source is actually ready (indexed VCF discoverable) and the source is enabled.
 
 Current gnomAD output scope:
 - gnomAD retrieval is executed during annotation and reported in annotation stage stats/diagnostics.
-- Dedicated persisted gnomAD evidence endpoint (`/gnomad_evidence`) is planned but not yet shipped.
+- Persisted gnomAD evidence is available at `GET /api/v1/runs/{run_id}/gnomad_evidence` (latest-upload stage gated, same contract style as dbSNP/ClinVar endpoints).
 
 Annotation evidence failure mode:
 - `SP_ANNOTATION_EVIDENCE_POLICY_DEFAULT` (default: `continue`)
@@ -271,6 +307,13 @@ Run settings API (annotation evidence policy):
 ```
 - Allowed values: `continue`, `stop`
 - Returns `409 RUN_SETTINGS_NOT_UPDATABLE` when run status is `running`.
+
+Annotation completeness signaling:
+- Annotation stats now include explicit completeness markers:
+  - `annotation_evidence_completeness`: `complete|partial|unavailable`
+  - `evidence_source_completeness`: source map for `dbsnp|clinvar|gnomad`
+  - `evidence_source_completeness_reason`: per-source reason code for completeness state
+- Reporting stage now carries forward annotation completeness summary so final-result messaging does not silently imply full completeness when evidence is partial/unavailable.
 
 ## SnpEff Setup Script (Windows)
 
@@ -305,6 +348,16 @@ Windows note: prefer relative `SP_SNPEFF_DATA_DIR` under `SP_SNPEFF_HOME` (for e
   - annotation stage summary stats
   - parsed annotated VCF preview as a table (`CHROM`, `POS`, `ID`, `REF`, `ALT`, etc.)
 - The table is sourced from the annotation artifact file (`snpeff.annotated.vcf`) for the latest successful upload of the run.
+
+## Final Result View
+
+- In `Results -> Final`, SP shows the pipeline-level outcome plus the reporting summary (documents/findings/tables).
+- The dedicated Reporting tab is removed; reporting summaries now live in the Final tab.
+
+## Results Pagination + Filters
+
+- Pre-annotation, classification, and prediction tables are paginated via next/previous controls.
+- Classification results can be filtered by consequence category.
 
 ## Pre-Annotation Behavior
 

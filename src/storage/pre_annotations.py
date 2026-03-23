@@ -145,13 +145,16 @@ def list_pre_annotations_for_run_public(
     run_id: str,
     *,
     limit: int = 100,
+    offset: int = 0,
     variant_id: str | None = None,
     conn: sqlite3.Connection | None = None,
 ) -> list[dict]:
     safe_limit = max(1, min(int(limit or 100), 1000))
+    safe_offset = max(0, int(offset or 0))
     requested_variant_id = (variant_id or "").strip() or None
     if requested_variant_id:
         safe_limit = 1
+        safe_offset = 0
 
     params: list[object] = [run_id]
     extra_where = ""
@@ -180,9 +183,9 @@ def list_pre_annotations_for_run_public(
             + "\n"
             + _PRE_ANNOTATION_ORDER_BY
             + """
-            LIMIT ?
+            LIMIT ? OFFSET ?
             """,
-            (*params, safe_limit),
+            (*params, safe_limit, safe_offset),
         ).fetchall()
 
     return [
@@ -198,3 +201,33 @@ def list_pre_annotations_for_run_public(
         }
         for r in rows
     ]
+
+
+def count_pre_annotations_for_run_public(
+    db_path: str,
+    run_id: str,
+    *,
+    variant_id: str | None = None,
+    conn: sqlite3.Connection | None = None,
+) -> int:
+    requested_variant_id = (variant_id or "").strip() or None
+
+    params: list[object] = [run_id]
+    extra_where = ""
+    if requested_variant_id:
+        extra_where = " AND a.variant_id = ?"
+        params.append(requested_variant_id)
+
+    with _maybe_connection(db_path, conn) as active:
+        init_schema(active)
+        row = active.execute(
+            """
+            SELECT COUNT(*)
+            FROM run_pre_annotations a
+            JOIN run_variants v ON v.variant_id = a.variant_id AND v.run_id = a.run_id
+            WHERE a.run_id = ?
+            """
+            + extra_where,
+            params,
+        ).fetchone()
+    return int(row[0] if row else 0)

@@ -296,6 +296,74 @@ class PredictorOutputsStorageTestCase(unittest.TestCase):
                 )
             self.assertIn("MISSING_REASON_CODE", str(ctx_missing_reason.exception))
 
+    def test_predictor_outputs_pagination_and_count(self):
+        from storage.db import init_schema, open_connection  # noqa: E402
+        from storage.predictor_outputs import (  # noqa: E402
+            count_predictor_outputs_for_run,
+            list_predictor_outputs_for_run,
+            upsert_predictor_outputs_for_run,
+        )
+        from storage.runs import create_run  # noqa: E402
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = os.path.join(tmpdir, "sp.db")
+            run_id = create_run(db_path)["run_id"]
+
+            with open_connection(db_path) as conn:
+                init_schema(conn)
+                conn.executemany(
+                    """
+                    INSERT INTO run_variants (
+                      variant_id, run_id, chrom, pos, ref, alt, source_line, created_at
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    [
+                        ("v1", run_id, "1", 1, "A", "G", 12, "2026-03-08T00:00:00+00:00"),
+                        ("v2", run_id, "1", 2, "C", "T", 13, "2026-03-08T00:00:00+00:00"),
+                    ],
+                )
+                conn.commit()
+
+            upsert_predictor_outputs_for_run(
+                db_path,
+                run_id,
+                [
+                    {
+                        "variant_id": "v1",
+                        "predictor_key": "sift",
+                        "outcome": "computed",
+                        "score": 0.12,
+                        "label": "deleterious",
+                        "reason_code": None,
+                        "reason_message": None,
+                        "details": {},
+                        "created_at": "2026-03-08T00:00:01+00:00",
+                    },
+                    {
+                        "variant_id": "v2",
+                        "predictor_key": "sift",
+                        "outcome": "computed",
+                        "score": 0.34,
+                        "label": "tolerated",
+                        "reason_code": None,
+                        "reason_message": None,
+                        "details": {},
+                        "created_at": "2026-03-08T00:00:02+00:00",
+                    },
+                ],
+            )
+
+            self.assertEqual(count_predictor_outputs_for_run(db_path, run_id), 2)
+            self.assertEqual(count_predictor_outputs_for_run(db_path, run_id, predictor_key="sift"), 2)
+
+            first_page = list_predictor_outputs_for_run(db_path, run_id, predictor_key="sift", limit=1, offset=0)
+            second_page = list_predictor_outputs_for_run(db_path, run_id, predictor_key="sift", limit=1, offset=1)
+
+            self.assertEqual(len(first_page), 1)
+            self.assertEqual(len(second_page), 1)
+            self.assertNotEqual(first_page[0]["variant_id"], second_page[0]["variant_id"])
+
 
 if __name__ == "__main__":
     unittest.main()

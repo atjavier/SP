@@ -66,13 +66,27 @@ class AppTestCase(unittest.TestCase):
         self.assertIn("id=\"cancel-run-btn\"", html)
         self.assertIn("id=\"current-run-status\"", html)
         self.assertIn("id=\"current-run-reference-build\"", html)
-        self.assertIn("id=\"current-run-evidence-policy\"", html)
         self.assertIn("id=\"current-run-stages\"", html)
         self.assertIn("id=\"current-run-stages-message\"", html)
+        self.assertIn("id=\"run-logs-panel\"", html)
+        self.assertIn("id=\"run-logs-console\"", html)
+        self.assertIn("id=\"run-logs-message\"", html)
         self.assertIn("id=\"annotation-vcf-message\"", html)
         self.assertIn("id=\"annotation-vcf-table\"", html)
         self.assertIn("id=\"annotation-vcf-head-row\"", html)
         self.assertIn("id=\"annotation-vcf-body\"", html)
+        self.assertIn("id=\"variant-evidence-message\"", html)
+        self.assertIn("id=\"variant-ev-dbsnp-completeness\"", html)
+        self.assertIn("id=\"variant-ev-clinvar-completeness\"", html)
+        self.assertIn("id=\"variant-ev-gnomad-completeness\"", html)
+        self.assertIn("Pipeline-level outcome only.", html)
+        self.assertIn("Stage-level technical output:", html)
+        self.assertIn("Reports Summary", html)
+        self.assertIn("reporting-significant-results", html)
+        self.assertIn("reporting-evidence-diagnostics", html)
+        self.assertIn("reporting-summary-note", html)
+        self.assertIn("variant-summary-completeness-filter", html)
+        self.assertIn("annotation-evidence-classification-filter", html)
 
         self.assertNotIn("id=\"upload-validate-btn\"", html)
         self.assertNotIn("id=\"start-run-btn\"", html)
@@ -103,6 +117,58 @@ class AppTestCase(unittest.TestCase):
             script,
             r'hidden\.bs\.offcanvas[\s\S]*toFocus\.focus\(\);[\s\S]*catch\s*{\s*// keep cleanup/resume path running even if focus management fails\s*}',
         )
+        self.assertIn("/dbsnp_evidence?variant_id=", script)
+        self.assertIn("/clinvar_evidence?variant_id=", script)
+        self.assertIn("/gnomad_evidence?variant_id=", script)
+        self.assertIn("variant-ev-dbsnp-completeness", script)
+        self.assertIn("variant-ev-clinvar-completeness", script)
+        self.assertIn("variant-ev-gnomad-completeness", script)
+        self.assertIn("function evidenceSourceLabel", script)
+        self.assertIn("source_mode", script)
+        self.assertIn("variantDetailsRequestSeq", script)
+        self.assertIn("requestToken === variantDetailsRequestSeq", script)
+        self.assertIn("Variant ID unavailable.", script)
+        self.assertIn("See Annotation for per-source diagnostics and error breakdowns.", script)
+        self.assertIn("EVIDENCE_SOURCES_UNAVAILABLE", script)
+        self.assertIn("Missing sources", script)
+        self.assertIn("Blocked outputs", script)
+        self.assertNotRegex(script, r"classification\\s*&&\\s*classification\\s*!==\\s*\"all\"")
+        self.assertIn("renderEvidenceDiagnosticsTable", script)
+
+    def test_results_controls_rows_are_actionable(self):
+        import app as sp_app
+
+        flask_app = sp_app.create_app()
+        client = flask_app.test_client()
+        resp = client.get("/static/results_controls.js")
+        self.assertEqual(resp.status_code, 200)
+        script = resp.get_data(as_text=True)
+        resp.close()
+
+        self.assertRegex(
+            script,
+            r"function wireVariantRowSelection\([^)]*\)\s*{[\s\S]*?tabIndex\s*=\s*0;[\s\S]*?addEventListener\(\"click\"",
+        )
+        self.assertRegex(
+            script,
+            r"function wireVariantRowSelection\([^)]*\)\s*{[\s\S]*?setAttribute\(\"role\", \"button\"\)",
+        )
+        self.assertRegex(
+            script,
+            r"function wireVariantRowSelection\([^)]*\)\s*{[\s\S]*?setAttribute\(\"aria-label\",",
+        )
+        self.assertRegex(
+            script,
+            r"function wireVariantRowSelection\([^)]*\)\s*{[\s\S]*?addEventListener\(\"keydown\"",
+        )
+        self.assertRegex(
+            script,
+            r"function renderVariantSummaryRows\([^)]*\)\s*{[\s\S]*?wireVariantRowSelection\(row,\s*tr\)",
+        )
+        self.assertRegex(
+            script,
+            r"function renderPredictionRows\([^)]*\)\s*{[\s\S]*?wireVariantRowSelection\(row,\s*tr\)",
+        )
 
     def test_run_controls_dispatches_run_changed_and_ignores_self_events(self):
         import app as sp_app
@@ -126,6 +192,98 @@ class AppTestCase(unittest.TestCase):
             script,
             r"window\.addEventListener\(\"sp:run-changed\",[\s\S]*?detail\?\.source === \"run-controls\"[\s\S]*?return;",
         )
+        self.assertIn("refreshFromServer(runId);", script)
+        self.assertIn("EVIDENCE_SOURCES_UNAVAILABLE", script)
+        self.assertIn("Missing evidence sources", script)
+
+    def test_run_controls_dispatches_variant_result_event(self):
+        import app as sp_app
+
+        flask_app = sp_app.create_app()
+        client = flask_app.test_client()
+        resp = client.get("/static/run_controls.js")
+        self.assertEqual(resp.status_code, 200)
+        script = resp.get_data(as_text=True)
+        resp.close()
+
+        self.assertIn('addEventListener("variant_result"', script)
+        self.assertIn('new CustomEvent("sp:variant-result"', script)
+
+    def test_results_controls_listens_for_variant_result(self):
+        import app as sp_app
+
+        flask_app = sp_app.create_app()
+        client = flask_app.test_client()
+        resp = client.get("/static/results_controls.js")
+        self.assertEqual(resp.status_code, 200)
+        script = resp.get_data(as_text=True)
+        resp.close()
+
+        self.assertIn('addEventListener("sp:variant-result"', script)
+
+    def test_status_indicator_css_utility_exists(self):
+        import app as sp_app
+
+        flask_app = sp_app.create_app()
+        client = flask_app.test_client()
+        resp = client.get("/static/app.css")
+        self.assertEqual(resp.status_code, 200)
+        css = resp.get_data(as_text=True)
+        resp.close()
+
+        self.assertIn(".status-indicator", css)
+        self.assertIn(".status-icon", css)
+
+    def test_run_controls_uses_status_indicator_helper(self):
+        import app as sp_app
+
+        flask_app = sp_app.create_app()
+        client = flask_app.test_client()
+        resp = client.get("/static/run_controls.js")
+        self.assertEqual(resp.status_code, 200)
+        script = resp.get_data(as_text=True)
+        resp.close()
+
+        self.assertIn("status-indicator", script)
+        self.assertRegex(script, r"function buildStatusIndicator\([^)]*\)")
+        self.assertRegex(script, r"function setStatusIndicator\([^)]*\)")
+        self.assertRegex(script, r"setStatusIndicator\(statusEl,")
+        self.assertRegex(script, r"setStatusIndicator\(badgeEl,")
+        self.assertIn('labelSpan.className = "status-label"', script)
+        self.assertIn("STATUS_LABEL_OVERRIDES", script)
+        self.assertIn("Queued", script)
+        self.assertIn("Running", script)
+        self.assertIn("Succeeded", script)
+        self.assertIn("Failed", script)
+        self.assertIn("Canceled", script)
+
+    def test_results_controls_uses_status_indicator_helper(self):
+        import app as sp_app
+
+        flask_app = sp_app.create_app()
+        client = flask_app.test_client()
+        resp = client.get("/static/results_controls.js")
+        self.assertEqual(resp.status_code, 200)
+        script = resp.get_data(as_text=True)
+        resp.close()
+
+        self.assertIn("status-indicator", script)
+        self.assertRegex(script, r"function buildStatusIndicator\([^)]*\)")
+        self.assertRegex(script, r"function setStatusIndicator\([^)]*\)")
+        self.assertRegex(
+            script,
+            r"function renderVariantSummaryRows\([^)]*\)\s*{[\s\S]*?setStatusIndicator",
+        )
+        self.assertRegex(
+            script,
+            r"function renderEvidenceDiagnosticsTable\([^)]*\)\s*{[\s\S]*?buildStatusIndicator",
+        )
+        self.assertIn('labelSpan.className = "status-label"', script)
+        self.assertIn("STATUS_LABEL_OVERRIDES", script)
+        self.assertIn("Partial", script)
+        self.assertIn("Unavailable", script)
+        self.assertIn("Not applicable", script)
+        self.assertIn("Not available", script)
 
 
 if __name__ == "__main__":

@@ -1,4 +1,5 @@
 import os
+import json
 import sqlite3
 import threading
 from collections.abc import Iterator
@@ -12,7 +13,13 @@ SCHEMA_STATEMENTS: tuple[str, ...] = (
       status TEXT NOT NULL,
       created_at TEXT NOT NULL,
       reference_build TEXT NOT NULL DEFAULT 'GRCh38',
-      annotation_evidence_policy TEXT NOT NULL DEFAULT 'continue'
+      annotation_evidence_policy TEXT NOT NULL DEFAULT 'continue',
+      evidence_mode_requested TEXT NOT NULL DEFAULT 'online',
+      evidence_mode_effective TEXT,
+      evidence_online_available INTEGER,
+      evidence_offline_sources_configured_json TEXT NOT NULL DEFAULT '{}',
+      evidence_mode_decision_reason TEXT,
+      evidence_mode_detected_at TEXT
     );
     """,
     """
@@ -587,6 +594,15 @@ def _normalize_annotation_evidence_policy(value: str | None) -> str | None:
     return None
 
 
+def _normalize_evidence_mode(value: str | None) -> str | None:
+    text = (value or "").strip().lower()
+    if text in {"local", "offline_local"}:
+        return "offline"
+    if text in {"online", "offline", "hybrid"}:
+        return text
+    return None
+
+
 def _default_annotation_evidence_policy_for_migration() -> str:
     explicit = _normalize_annotation_evidence_policy(
         os.environ.get("SP_ANNOTATION_EVIDENCE_POLICY_DEFAULT")
@@ -597,6 +613,26 @@ def _default_annotation_evidence_policy_for_migration() -> str:
     if legacy is None:
         return "continue"
     return "stop" if _truthy_env("SP_ANNOTATION_FAIL_ON_EVIDENCE_ERROR") else "continue"
+
+
+def _default_requested_evidence_mode_for_migration() -> str:
+    explicit = _normalize_evidence_mode(os.environ.get("SP_EVIDENCE_MODE"))
+    return explicit or "online"
+
+
+def _normalize_offline_sources_json(value: str | None) -> str:
+    try:
+        loaded = json.loads(value or "{}")
+    except Exception:
+        loaded = {}
+    if not isinstance(loaded, dict):
+        loaded = {}
+    normalized = {
+        "dbsnp": bool(loaded.get("dbsnp", False)),
+        "clinvar": bool(loaded.get("clinvar", False)),
+        "gnomad": bool(loaded.get("gnomad", False)),
+    }
+    return json.dumps(normalized, separators=(",", ":"))
 
 
 def ensure_parent_dir(path: str) -> None:
@@ -658,6 +694,7 @@ def _connection_cache_key(conn: sqlite3.Connection) -> str:
 def _apply_schema_migrations(conn: sqlite3.Connection) -> None:
     _ensure_runs_reference_build_column(conn)
     _ensure_runs_annotation_evidence_policy_column(conn)
+    _ensure_runs_evidence_mode_columns(conn)
     _normalize_stage_status_vocabulary(conn)
 
 
@@ -715,3 +752,119 @@ def _ensure_runs_annotation_evidence_policy_column(conn: sqlite3.Connection) -> 
         """,
         (fallback_policy,),
     )
+
+
+def _ensure_runs_evidence_mode_columns(conn: sqlite3.Connection) -> None:
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(runs);").fetchall()}
+    default_requested_mode = _default_requested_evidence_mode_for_migration()
+
+    if "evidence_mode_requested" not in columns:
+        conn.execute(
+            "ALTER TABLE runs ADD COLUMN evidence_mode_requested TEXT NOT NULL DEFAULT 'online';"
+        )
+        if default_requested_mode != "online":
+            conn.execute(
+                "UPDATE runs SET evidence_mode_requested = ?",
+                (default_requested_mode,),
+            )
+
+    if "evidence_mode_effective" not in columns:
+        conn.execute("ALTER TABLE runs ADD COLUMN evidence_mode_effective TEXT;")
+
+    if "evidence_online_available" not in columns:
+        conn.execute("ALTER TABLE runs ADD COLUMN evidence_online_available INTEGER;")
+
+    if "evidence_offline_sources_configured_json" not in columns:
+        conn.execute(
+            "ALTER TABLE runs ADD COLUMN evidence_offline_sources_configured_json TEXT NOT NULL DEFAULT '{}';"
+        )
+        conn.execute(
+            """
+            UPDATE runs
+            SET evidence_offline_sources_configured_json = ?
+            WHERE evidence_offline_sources_configured_json IS NULL
+               OR TRIM(evidence_offline_sources_configured_json) = ''
+            """,
+            (_normalize_offline_sources_json("{}"),),
+        )
+    else:
+        rows = conn.execute(
+            """
+            SELECT run_id, evidence_offline_sources_configured_json
+            FROM runs
+            """
+        ).fetchall()
+        for run_id, raw_value in rows:
+            normalized = _normalize_offline_sources_json(raw_value)
+            if raw_value != normalized:
+                conn.execute(
+                    """
+                    UPDATE runs
+                    SET evidence_offline_sources_configured_json = ?
+                    WHERE run_id = ?
+                    """,
+                    (normalized, run_id),
+                )
+
+    if "evidence_mode_decision_reason" not in columns:
+        conn.execute("ALTER TABLE runs ADD COLUMN evidence_mode_decision_reason TEXT;")
+    if "evidence_mode_detected_at" not in columns:
+        conn.execute("ALTER TABLE runs ADD COLUMN evidence_mode_detected_at TEXT;")
+
+    invalid_requested = conn.execute(
+        """
+        SELECT 1
+        FROM runs
+        WHERE evidence_mode_requested IS NULL
+           OR evidence_mode_requested NOT IN ('online', 'offline', 'hybrid')
+        LIMIT 1
+        """
+    ).fetchone()
+    if invalid_requested:
+        conn.execute(
+            """
+            UPDATE runs
+            SET evidence_mode_requested = ?
+            WHERE evidence_mode_requested IS NULL
+               OR evidence_mode_requested NOT IN ('online', 'offline', 'hybrid')
+            """,
+            (default_requested_mode,),
+        )
+
+    invalid_effective = conn.execute(
+        """
+        SELECT 1
+        FROM runs
+        WHERE evidence_mode_effective IS NOT NULL
+          AND evidence_mode_effective NOT IN ('online', 'offline', 'hybrid')
+        LIMIT 1
+        """
+    ).fetchone()
+    if invalid_effective:
+        conn.execute(
+            """
+            UPDATE runs
+            SET evidence_mode_effective = NULL
+            WHERE evidence_mode_effective IS NOT NULL
+              AND evidence_mode_effective NOT IN ('online', 'offline', 'hybrid')
+            """
+        )
+
+    invalid_online_available = conn.execute(
+        """
+        SELECT 1
+        FROM runs
+        WHERE evidence_online_available IS NOT NULL
+          AND evidence_online_available NOT IN (0, 1)
+        LIMIT 1
+        """
+    ).fetchone()
+    if invalid_online_available:
+        conn.execute(
+            """
+            UPDATE runs
+            SET evidence_online_available = NULL
+            WHERE evidence_online_available IS NOT NULL
+              AND evidence_online_available NOT IN (0, 1)
+            """
+        )

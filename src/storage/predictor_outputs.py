@@ -117,9 +117,13 @@ def list_predictor_outputs_for_run(
     predictor_key: str | None = None,
     variant_id: str | None = None,
     limit: int = 100,
+    offset: int = 0,
     conn: sqlite3.Connection | None = None,
 ) -> list[dict]:
     safe_limit = max(1, min(int(limit or 100), 1000))
+    safe_offset = max(0, int(offset or 0))
+    if variant_id:
+        safe_offset = 0
 
     where = ["o.run_id = ?"]
     params: list[object] = [run_id]
@@ -132,6 +136,36 @@ def list_predictor_outputs_for_run(
 
     with _maybe_connection(db_path, conn) as active:
         init_schema(active)
+        variant_ids = [
+            row[0]
+            for row in active.execute(
+                """
+                SELECT v.variant_id
+                FROM run_variants v
+                JOIN run_predictor_outputs o
+                  ON o.run_id = v.run_id AND o.variant_id = v.variant_id
+                WHERE
+                """
+                + " AND ".join(where)
+                + "\n"
+                + variant_order_by("v")
+                + """
+                LIMIT ? OFFSET ?
+                """,
+                (*params, safe_limit, safe_offset),
+            ).fetchall()
+        ]
+
+        if not variant_ids:
+            return []
+
+        variant_placeholders = ", ".join("?" for _ in variant_ids)
+        output_where = ["o.run_id = ?", f"o.variant_id IN ({variant_placeholders})"]
+        output_params: list[object] = [run_id, *variant_ids]
+        if predictor_key:
+            output_where.append("o.predictor_key = ?")
+            output_params.append(predictor_key)
+
         rows = active.execute(
             """
             SELECT
@@ -154,13 +188,12 @@ def list_predictor_outputs_for_run(
             JOIN run_variants v ON v.variant_id = o.variant_id AND v.run_id = o.run_id
             WHERE
             """
-            + " AND ".join(where)
+            + " AND ".join(output_where)
             + "\n"
             + _PREDICTOR_OUTPUTS_ORDER_BY
             + """
-            LIMIT ?
             """,
-            (*params, safe_limit),
+            output_params,
         ).fetchall()
 
     items: list[dict] = []
@@ -191,3 +224,36 @@ def list_predictor_outputs_for_run(
         )
 
     return items
+
+
+def count_predictor_outputs_for_run(
+    db_path: str,
+    run_id: str,
+    *,
+    predictor_key: str | None = None,
+    variant_id: str | None = None,
+    conn: sqlite3.Connection | None = None,
+) -> int:
+    where = ["o.run_id = ?"]
+    params: list[object] = [run_id]
+    if predictor_key:
+        where.append("o.predictor_key = ?")
+        params.append(predictor_key)
+    if variant_id:
+        where.append("o.variant_id = ?")
+        params.append(variant_id)
+
+    with _maybe_connection(db_path, conn) as active:
+        init_schema(active)
+        row = active.execute(
+            """
+            SELECT COUNT(DISTINCT v.variant_id)
+            FROM run_variants v
+            JOIN run_predictor_outputs o
+              ON o.run_id = v.run_id AND o.variant_id = v.variant_id
+            WHERE
+            """
+            + " AND ".join(where),
+            params,
+        ).fetchone()
+    return int(row[0] if row else 0)

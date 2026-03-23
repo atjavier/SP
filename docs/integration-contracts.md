@@ -142,8 +142,10 @@ Significance:
 | 6.0 | annotation | SnpEff annotation | Integrated |
 | 6.1 | annotation evidence | dbSNP retrieval (online + local tabix) | Integrated |
 | 6.2 | annotation evidence | ClinVar retrieval (online + local tabix) | Integrated |
-| 6.3 (in progress) | annotation evidence | gnomAD retrieval (online) | Retrieval integrated in annotation stats/diagnostics; dedicated persistence endpoint pending |
-| 6.4 | annotation evidence policy | Run-scoped stop/continue behavior + failure signaling | Integrated |
+| 6.3 | annotation evidence | gnomAD retrieval (online + persisted endpoint) | Integrated |
+| 6.4, 6.5 | annotation evidence policy/completeness | Run-scoped stop/continue behavior + explicit completeness signaling | Integrated |
+| 7.1 | annotation preflight | Evidence-mode detection + run telemetry persistence | Integrated |
+| 7.2 | annotation evidence | Offline local source query hardening, provenance surfacing, and diagnostics guidance | Integrated |
 
 ---
 
@@ -211,6 +213,9 @@ Primary code: `src/pipeline/classification_stage.py`, `src/storage/classificatio
 - Builds minimal VCF and runs VEP JSON consequence extraction.
 - Uses consequence terms to map category:
   - `missense`, `synonymous`, `nonsense`, `other`, else `unclassified`.
+- Optional batching:
+  - `SP_VEP_BATCH_SIZE` controls the per-batch variant count (set `0` to disable).
+  - Batch artifacts are written as `classification.input.batchN.vcf` and `classification.vep.batchN.jsonl`.
 
 ### Output structure
 - DB (`run_classifications`), public API (`GET /api/v1/runs/<run_id>/classifications`)
@@ -369,6 +374,9 @@ GET {SP_DBSNP_API_BASE_URL}/spdi/{seq_id}:{position}:{deleted}:{inserted}/rsids[
   "retrieved_at": "ISO-8601"
 }
 ```
+- Offline/hybrid provenance fields are included in `details` when local lookup is used:
+  - `source_mode` (for example `offline_local`)
+  - `local_vcf_path`, `record_region` (when available)
 
 ---
 
@@ -426,6 +434,9 @@ GET {SP_CLINVAR_API_BASE_URL}/esummary.fcgi?db=clinvar&retmode=json&id={uid}[&ap
   "retrieved_at": "ISO-8601"
 }
 ```
+- Offline/hybrid provenance fields are included in `details` when local lookup is used:
+  - `source_mode` (for example `offline_local`)
+  - `local_vcf_path`, `record_region` (when available)
 
 ---
 
@@ -437,7 +448,7 @@ Primary code: `src/pipeline/gnomad_client.py`, `src/pipeline/annotation_stage.py
 ### Input
 - Variant fields: `chrom`, `pos`, `ref`, `alt`
 - Config:
-  - `SP_EVIDENCE_PROFILE` (`full|minimum_exome|predictor_only`, default `full`)
+- `SP_EVIDENCE_PROFILE` (forced to `predictor_only`; evidence is missense-only)
   - `SP_EVIDENCE_MODE` (`online` project default)
   - `SP_GNOMAD_ENABLED`
   - `SP_GNOMAD_API_BASE_URL`
@@ -475,8 +486,24 @@ Client behavior:
 - Accepts partial responses when `data.variant` is present even if `errors[]` exists.
 
 ### Output structure
-- Currently stored in annotation stage stats only (not yet persisted in a dedicated table/endpoint).
-- Stats fields include:
+- DB (`run_gnomad_evidence`), public API (`GET /api/v1/runs/<run_id>/gnomad_evidence`)
+```json
+{
+  "variant_id": "uuid",
+  "source": "gnomad",
+  "outcome": "found|not_found|error",
+  "gnomad_variant_id": "1-69134-A-G|null",
+  "global_af": 0.00123,
+  "reason_code": "string|null",
+  "reason_message": "string|null",
+  "details": {},
+  "retrieved_at": "ISO-8601"
+}
+```
+- Offline/hybrid provenance fields are included in `details` when local lookup is used:
+  - `source_mode` (for example `offline_local`)
+  - `local_vcf_path`, `record_region`, `af_source` (when available)
+- Annotation stage stats also include:
   - `gnomad_found`, `gnomad_not_found`, `gnomad_errors`
   - `gnomad_error_reason_counts`
   - `gnomad_error_http_status_counts`
@@ -485,17 +512,17 @@ Client behavior:
   - `gnomad_skipped_out_of_scope`
 
 Profile scope note:
-- When `SP_EVIDENCE_PROFILE=minimum_exome`, out-of-scope variants are skipped before API calls.
-- When `SP_EVIDENCE_PROFILE=predictor_only`, only `missense` variants are queried for evidence.
+- Evidence annotation is enforced as missense-only. Profile settings are ignored.
+- Only `missense` variants are eligible for evidence queries.
 - Stage stats surface the same eligible/skipped counters for dbSNP and ClinVar:
   - `dbsnp_variants_eligible`, `dbsnp_skipped_out_of_scope`
   - `clinvar_variants_eligible`, `clinvar_skipped_out_of_scope`
 
 ---
 
-## 9) Annotation Evidence Failure Policy (run-scoped)
+## 9) Annotation Evidence Failure Policy And Completeness (run-scoped)
 
-Story key: `6-4`  
+Story key: `6-4`, `6-5`  
 Primary code: `src/storage/runs.py`, `src/app.py`, `src/pipeline/annotation_stage.py`, `src/static/upload_controls.js`, `src/static/run_controls.js`, `src/static/results_controls.js`
 
 ### Input
@@ -525,10 +552,40 @@ Content-Type: application/json
 ### Runtime behavior
 - `stop`:
   - annotation stage fails on evidence retrieval failure
-  - error details include `failed_source`, `missing_outputs`, `annotation_evidence_policy`
+  - error details include `failed_source`, computed `missing_outputs`, `annotation_evidence_policy`
 - `continue`:
   - annotation stage succeeds with warning/error counters in stats
   - stats include `annotation_evidence_policy`, `fail_on_evidence_error`, `evidence_failed_sources`
+
+### Completeness behavior
+- Annotation stage computes explicit completeness markers:
+  - `annotation_evidence_completeness`: `complete|partial|unavailable`
+  - `evidence_source_completeness`: map for `dbsnp|clinvar|gnomad`
+  - `evidence_source_completeness_reason`: per-source reason codes
+  - `evidence_complete_sources|evidence_partial_sources|evidence_unavailable_sources`
+- Reporting stage carries forward completeness summary so final-result state cannot silently imply full evidence completeness.
+
+### Evidence mode detector behavior (Story 7.1, Story 7.2)
+- Input signals:
+  - Requested mode from `SP_EVIDENCE_MODE` (`online|offline|hybrid`)
+  - Online availability from short bounded connectivity probes
+  - Offline configured map from local VCF path presence (`dbsnp|clinvar|gnomad`)
+  - Offline available map from local source readiness + source enabled (`dbsnp|clinvar|gnomad`)
+- Decision output (persisted on `runs`):
+  - `evidence_mode_requested`
+  - `evidence_mode_effective`
+  - `evidence_online_available`
+  - `evidence_offline_sources_configured` (`dbsnp|clinvar|gnomad`)
+  - `evidence_mode_decision_reason`
+  - `evidence_mode_detected_at`
+- Additional annotation-stage diagnostics (not run-level persisted fields):
+  - `evidence_offline_sources_available` (`dbsnp|clinvar|gnomad`)
+  - `evidence_offline_sources_unavailable_reason` (`dbsnp|clinvar|gnomad`)
+- Effective mode rules:
+  - Requested `online`: use `online`, fallback to `offline` if online unavailable and offline configured
+  - Requested `offline`: use `offline`, fallback to `online` if offline unavailable and online available
+  - Requested `hybrid`: use `hybrid` only when both paths are available, else degrade to available single path
+  - If neither path is available, keep requested mode and persist reason, then fail annotation via `EVIDENCE_SOURCES_UNAVAILABLE` (Story 7.3 behavior).
 
 ### Backward-compatible defaults
 - New default env: `SP_ANNOTATION_EVIDENCE_POLICY_DEFAULT` (`continue|stop`)
@@ -541,17 +598,75 @@ Content-Type: application/json
   "run_id": "uuid",
   "status": "queued|running|...",
   "reference_build": "GRCh38",
-  "annotation_evidence_policy": "continue|stop"
+  "annotation_evidence_policy": "continue|stop",
+  "evidence_mode_requested": "online|offline|hybrid",
+  "evidence_mode_effective": "online|offline|hybrid|null",
+  "evidence_online_available": true,
+  "evidence_offline_sources_configured": {
+    "dbsnp": false,
+    "clinvar": false,
+    "gnomad": false
+  },
+  "evidence_mode_decision_reason": "string|null",
+  "evidence_mode_detected_at": "ISO-8601|null"
 }
 ```
+- Annotation stage stats include per-source readiness maps:
+  - `evidence_offline_sources_available`
+  - `evidence_offline_sources_unavailable_reason`
 - Annotation stage failure details (stop mode) include:
 ```json
 {
   "failed_source": "dbsnp|clinvar|gnomad",
-  "missing_outputs": ["dbsnp", "clinvar", "gnomad"],
-  "annotation_evidence_policy": "stop"
+  "missing_outputs": ["computed by failure point/order"],
+  "annotation_evidence_policy": "stop",
+  "annotation_evidence_completeness": "partial|unavailable",
+  "evidence_source_completeness": {
+    "dbsnp": "complete|partial|unavailable",
+    "clinvar": "complete|partial|unavailable",
+    "gnomad": "complete|partial|unavailable"
+  }
 }
 ```
+
+### Strict no-valid-source block contract (Story 7.3)
+- Trigger condition:
+  - enabled evidence sources exist, and
+  - online is unavailable, and
+  - all required offline sources are unavailable for those enabled sources.
+- Annotation stage fails with:
+  - `error.code = "EVIDENCE_SOURCES_UNAVAILABLE"`
+  - `error.message = "Neither online nor offline evidence sources are available for annotation."`
+- Error details include:
+```json
+{
+  "requested_mode": "online|offline|hybrid",
+  "effective_mode": "online|offline|hybrid",
+  "decision_reason": "requested_*_no_valid_source",
+  "online_available": false,
+  "offline_sources_configured": {"dbsnp": false, "clinvar": false, "gnomad": false},
+  "offline_sources_available": {"dbsnp": false, "clinvar": false, "gnomad": false},
+  "offline_sources_unavailable_reason": {"dbsnp": "", "clinvar": "", "gnomad": ""},
+  "enabled_sources": {"dbsnp": true, "clinvar": true, "gnomad": true},
+  "required_sources": ["dbsnp", "clinvar", "gnomad"],
+  "missing_sources": ["dbsnp", "clinvar", "gnomad"],
+  "missing_source_env_vars": [
+    "SP_DBSNP_LOCAL_VCF_PATH",
+    "SP_CLINVAR_LOCAL_VCF_PATH",
+    "SP_GNOMAD_LOCAL_VCF_PATH"
+  ],
+  "missing_outputs": ["dbsnp", "clinvar", "gnomad", "reporting"],
+  "blocked_outputs": ["annotation", "reporting"],
+  "failed_source": "all_evidence_sources_unavailable",
+  "annotation_evidence_policy": "continue|stop",
+  "annotation_evidence_completeness": "unavailable",
+  "hint": "Restore connectivity or configure indexed local VCF paths and retry."
+}
+```
+- Reporting and downstream signaling behavior:
+  - reporting stage remains `queued` for that upload
+  - annotation-dependent result summaries must show blocked outputs and missing sources
+  - pipeline does not produce a misleading successful completion for that upload.
 
 ---
 
@@ -563,5 +678,6 @@ These endpoints return data only when the corresponding stage succeeded for the 
 - `GET /api/v1/runs/<run_id>/predictor_outputs`
 - `GET /api/v1/runs/<run_id>/dbsnp_evidence`
 - `GET /api/v1/runs/<run_id>/clinvar_evidence`
+- `GET /api/v1/runs/<run_id>/gnomad_evidence`
 
 If stage/upload mismatch exists, endpoints return `ok: true` with empty arrays for safety.

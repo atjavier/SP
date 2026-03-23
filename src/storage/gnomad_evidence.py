@@ -8,6 +8,9 @@ from storage.variant_ordering import variant_order_by
 
 
 _VALID_OUTCOMES: frozenset[str] = frozenset({"found", "not_found", "error"})
+_VALID_CLASSIFICATIONS: frozenset[str] = frozenset(
+    {"unclassified", "synonymous", "missense", "nonsense", "other"}
+)
 _SOURCE = "gnomad"
 _ORDER_BY = "\n" + variant_order_by("v")
 
@@ -114,19 +117,33 @@ def list_gnomad_evidence_for_run(
     run_id: str,
     *,
     variant_id: str | None = None,
+    classification: str | None = None,
+    outcome: str | None = None,
     limit: int = 100,
     conn: sqlite3.Connection | None = None,
 ) -> list[dict]:
     safe_limit = max(1, min(int(limit or 100), 1000))
     requested_variant_id = (variant_id or "").strip() or None
+    requested_classification = _normalize_classification_filter(classification)
+    requested_outcome = _normalize_outcome_filter(outcome)
     if requested_variant_id:
         safe_limit = 1
+        requested_classification = None
+        requested_outcome = None
 
     where = ["e.run_id = ?", "e.source = ?"]
     params: list[object] = [run_id, _SOURCE]
     if requested_variant_id:
         where.append("e.variant_id = ?")
         params.append(requested_variant_id)
+    join_classification = ""
+    if requested_classification:
+        join_classification = "JOIN run_classifications c ON c.run_id = e.run_id AND c.variant_id = e.variant_id"
+        where.append("c.consequence_category = ?")
+        params.append(requested_classification)
+    if requested_outcome:
+        where.append("e.outcome = ?")
+        params.append(requested_outcome)
 
     with _maybe_connection(db_path, conn) as active:
         init_schema(active)
@@ -150,6 +167,9 @@ def list_gnomad_evidence_for_run(
               e.retrieved_at
             FROM run_gnomad_evidence e
             JOIN run_variants v ON v.variant_id = e.variant_id AND v.run_id = e.run_id
+            """
+            + (f"\n{join_classification}" if join_classification else "")
+            + """
             WHERE
             """
             + " AND ".join(where)
@@ -189,3 +209,20 @@ def list_gnomad_evidence_for_run(
         )
     return items
 
+
+def _normalize_classification_filter(value: str | None) -> str | None:
+    normalized = (value or "").strip().lower()
+    if not normalized or normalized == "all":
+        return None
+    if normalized in _VALID_CLASSIFICATIONS:
+        return normalized
+    return None
+
+
+def _normalize_outcome_filter(value: str | None) -> str | None:
+    normalized = (value or "").strip().lower()
+    if not normalized or normalized == "all":
+        return None
+    if normalized in _VALID_OUTCOMES:
+        return normalized
+    return None

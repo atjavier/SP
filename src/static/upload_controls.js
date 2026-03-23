@@ -70,6 +70,9 @@
           created_at: run.created_at ?? null,
           reference_build: run.reference_build ?? null,
           annotation_evidence_policy: run.annotation_evidence_policy ?? null,
+          evidence_mode_requested: run.evidence_mode_requested ?? null,
+          evidence_mode_effective: run.evidence_mode_effective ?? null,
+          evidence_mode_decision_reason: run.evidence_mode_decision_reason ?? null,
         }),
       );
     } catch {

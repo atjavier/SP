@@ -16,6 +16,19 @@ code {
   padding: 0;
 }
 
+.status-indicator {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  white-space: nowrap;
+}
+
+.status-indicator .status-icon {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+  font-size: 0.8em;
+  letter-spacing: 0.02em;
+}
+
 /* Keep keyboard focus obvious; do not remove outlines. */
 :focus-visible {
   outline: 2px solid rgba(13, 110, 253, 0.9);

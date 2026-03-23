@@ -7,18 +7,20 @@
   const runIdEl = document.getElementById("current-run-id");
   const statusEl = document.getElementById("current-run-status");
   const referenceBuildEl = document.getElementById("current-run-reference-build");
-  const evidencePolicyEl = document.getElementById("current-run-evidence-policy");
   const stagesEl = document.getElementById("current-run-stages");
   const stagesMessageEl = document.getElementById("current-run-stages-message");
+  const runLogsPanelEl = document.getElementById("run-logs-panel");
+  const runLogsConsoleEl = document.getElementById("run-logs-console");
+  const runLogsMessageEl = document.getElementById("run-logs-message");
   const messageEl = document.getElementById("run-status-message");
   const liveUpdatesEl = document.getElementById("live-updates-indicator");
+  const workspaceTabsEl = document.getElementById("workspace-tabs");
 
   if (
     !cancelRunBtn ||
     !runIdEl ||
     !statusEl ||
     !referenceBuildEl ||
-    !evidencePolicyEl ||
     !stagesEl ||
     !stagesMessageEl ||
     !messageEl ||
@@ -27,7 +29,10 @@
     return;
   }
 
+  const logsEnabled = Boolean(runLogsPanelEl && runLogsConsoleEl && runLogsMessageEl);
   const STORAGE_KEY = "sp_current_run";
+  const RUN_LOG_POLL_MS = 3000;
+  const RUN_LOG_LIMIT = 200;
   const PIPELINE_STAGE_ORDER = [
     "parser",
     "pre_annotation",
@@ -39,9 +44,15 @@
   let currentRunId = null;
   let currentRunStatus = null;
   let currentRunEvidencePolicy = null;
+  let currentRunEvidenceModeRequested = null;
+  let currentRunEvidenceModeEffective = null;
+  let currentRunEvidenceModeReason = null;
   let lastStagesSnapshot = null;
   let eventSource = null;
   let elapsedTimerId = null;
+  let runLogPollId = null;
+  let lastLogRunId = null;
+  let runLogsLoaded = false;
   const dateTimeFormatter = new Intl.DateTimeFormat("en-US", {
     month: "2-digit",
     day: "2-digit",
@@ -51,10 +62,90 @@
     second: "2-digit",
   });
 
+  function activateWorkspaceTab(tabEl) {
+    if (!tabEl) return;
+    if (window.bootstrap?.Tab) {
+      window.bootstrap.Tab.getOrCreateInstance(tabEl).show();
+      return;
+    }
+    tabEl.click();
+  }
+
+  function getWorkspaceTabs() {
+    if (!workspaceTabsEl) return [];
+    return Array.from(workspaceTabsEl.querySelectorAll('[role="tab"]'));
+  }
+
+  function moveWorkspaceTabFocus(tabs, nextIndex, activate) {
+    if (!tabs.length) return;
+    let targetIndex = nextIndex;
+    if (targetIndex < 0) targetIndex = tabs.length - 1;
+    if (targetIndex >= tabs.length) targetIndex = 0;
+    const target = tabs[targetIndex];
+    if (!target) return;
+    target.focus();
+    if (activate) activateWorkspaceTab(target);
+  }
+
+  function handleWorkspaceTabKeydown(event) {
+    if (!workspaceTabsEl) return;
+    const tabEl = event.target?.closest?.('[role="tab"]');
+    if (!tabEl || !workspaceTabsEl.contains(tabEl)) return;
+    const tabs = getWorkspaceTabs();
+    const currentIndex = tabs.indexOf(tabEl);
+    if (currentIndex < 0) return;
+
+    let nextIndex = null;
+    switch (event.key) {
+      case "ArrowLeft":
+        nextIndex = currentIndex - 1;
+        break;
+      case "ArrowRight":
+        nextIndex = currentIndex + 1;
+        break;
+      case "Home":
+        nextIndex = 0;
+        break;
+      case "End":
+        nextIndex = tabs.length - 1;
+        break;
+      case "Enter":
+      case " ":
+        event.preventDefault();
+        activateWorkspaceTab(tabEl);
+        return;
+      default:
+        return;
+    }
+
+    if (nextIndex != null) {
+      event.preventDefault();
+      moveWorkspaceTabFocus(tabs, nextIndex, false);
+    }
+  }
+
   function clearMessage() {
     while (messageEl.firstChild) {
       messageEl.removeChild(messageEl.firstChild);
     }
+  }
+
+  function clearRunLogsMessage() {
+    if (!logsEnabled) return;
+    while (runLogsMessageEl.firstChild) {
+      runLogsMessageEl.removeChild(runLogsMessageEl.firstChild);
+    }
+  }
+
+  function setRunLogsMessage(text) {
+    if (!logsEnabled) return;
+    const normalized = text || "";
+    if (runLogsMessageEl.textContent === normalized) return;
+    clearRunLogsMessage();
+    if (!normalized) return;
+    const span = document.createElement("span");
+    span.textContent = normalized;
+    runLogsMessageEl.appendChild(span);
   }
 
   function setMessage(kind, text) {
@@ -72,20 +163,80 @@
     messageEl.appendChild(alertEl);
   }
 
-  function formatStatus(status) {
-    if (!status) return "No run";
-    if (status === "queued") return "Idle";
-    if (status === "running") return "Running";
-    if (status === "succeeded") return "Succeeded";
-    if (status === "failed") return "Failed";
-    if (status === "canceled") return "Canceled";
-    return status;
+  const STATUS_LABEL_OVERRIDES = {
+    queued: "Queued",
+    running: "Running",
+    succeeded: "Succeeded",
+    failed: "Failed",
+    canceled: "Canceled",
+  };
+  const STATUS_ICON_MAP = {
+    queued: "[~]",
+    running: "[~]",
+    succeeded: "[OK]",
+    failed: "[!]",
+    canceled: "[x]",
+  };
+
+  function normalizeStatusKey(value) {
+    if (!value) return "";
+    return String(value).trim().toLowerCase().replace(/_/g, " ");
   }
 
-  function formatEvidencePolicy(policy) {
-    const normalized = String(policy || "").trim().toLowerCase();
-    if (normalized === "stop") return "stop (fail annotation stage)";
-    if (normalized === "continue") return "continue (allow partial evidence)";
+  function statusLabel(status) {
+    const normalized = normalizeStatusKey(status);
+    if (!normalized) return "";
+    if (STATUS_LABEL_OVERRIDES[normalized]) return STATUS_LABEL_OVERRIDES[normalized];
+    return normalized.replace(/\b\w/g, (c) => c.toUpperCase());
+  }
+
+  function statusIcon(status) {
+    const normalized = normalizeStatusKey(status);
+    return STATUS_ICON_MAP[normalized] || "";
+  }
+
+  function buildStatusIndicator(status, labelText) {
+    const indicator = document.createElement("span");
+    indicator.className = "status-indicator";
+    const normalized = normalizeStatusKey(status);
+    if (normalized) {
+      indicator.dataset.status = normalized.replace(/\s+/g, "-");
+    }
+
+    const icon = statusIcon(status);
+    if (icon) {
+      const iconSpan = document.createElement("span");
+      iconSpan.className = "status-icon";
+      iconSpan.setAttribute("aria-hidden", "true");
+      iconSpan.textContent = icon;
+      indicator.appendChild(iconSpan);
+    }
+
+    const label = labelText || statusLabel(status) || (status ? String(status) : "\u2014");
+    const labelSpan = document.createElement("span");
+    labelSpan.className = "status-label";
+    labelSpan.textContent = label;
+    indicator.appendChild(labelSpan);
+
+    return indicator;
+  }
+
+  function setStatusIndicator(container, status, labelText) {
+    if (!container) return;
+    clearEl(container);
+    container.appendChild(buildStatusIndicator(status, labelText));
+  }
+
+  function formatStatus(status) {
+    if (!status) return "No run";
+    return statusLabel(status) || status;
+  }
+
+  function formatEvidenceMode(mode) {
+    const normalized = String(mode || "").trim().toLowerCase();
+    if (normalized === "online") return "online";
+    if (normalized === "offline") return "offline";
+    if (normalized === "hybrid") return "hybrid";
     return "\u2014";
   }
 
@@ -111,19 +262,22 @@
   }
 
   function humanizeStageName(stageName) {
-    const normalized = String(stageName || "").replace(/_/g, " ").trim();
+    const normalized = String(stageName || "").trim();
     if (!normalized) return "Stage";
-    return normalized.replace(/\b\w/g, (c) => c.toUpperCase());
+    const overrides = {
+      classification: "Consequence classification (VEP)",
+      prediction: "Functional prediction",
+      annotation: "Evidence annotation",
+    };
+    if (overrides[normalized]) return overrides[normalized];
+    const spaced = normalized.replace(/_/g, " ").trim();
+    if (!spaced) return "Stage";
+    return spaced.replace(/\b\w/g, (c) => c.toUpperCase());
   }
 
   function formatStageStatus(status) {
     if (!status) return "Queued";
-    if (status === "queued") return "Queued";
-    if (status === "running") return "Running";
-    if (status === "succeeded") return "Succeeded";
-    if (status === "failed") return "Failed";
-    if (status === "canceled") return "Canceled";
-    return String(status);
+    return statusLabel(status) || String(status);
   }
 
   function stageBadgeClass(status) {
@@ -157,6 +311,121 @@
     if (hours > 0) return `${hours}h ${minutes}m ${seconds}s`;
     if (minutes > 0) return `${minutes}m ${seconds}s`;
     return `${seconds}s`;
+  }
+
+  function isPipelineActive(status) {
+    return status === "running";
+  }
+
+  function isScrolledToBottom(el) {
+    if (!el) return true;
+    const threshold = 4;
+    return el.scrollTop + el.clientHeight >= el.scrollHeight - threshold;
+  }
+
+  function formatLogLine(entry) {
+    if (!entry || typeof entry !== "object") {
+      return sanitizeInline(entry);
+    }
+    const eventAt = entry.event_at ? String(entry.event_at) : "\u2014";
+    const level = entry.level ? String(entry.level).toUpperCase() : "INFO";
+    const eventName = entry.event ? String(entry.event) : "event";
+    const stageName = entry.stage_name ? ` stage=${entry.stage_name}` : "";
+    const status = entry.status ? ` status=${entry.status}` : "";
+    const message = entry.message ? ` - ${sanitizeInline(entry.message, 200)}` : "";
+    const errorCode = entry.error_code ? ` error=${entry.error_code}` : "";
+    const errorMessage = entry.error_message
+      ? ` reason=${sanitizeInline(entry.error_message, 200)}`
+      : "";
+    return `${eventAt} [${level}] ${eventName}${stageName}${status}${errorCode}${errorMessage}${message}`;
+  }
+
+  function renderRunLogs(logs) {
+    if (!logsEnabled) return;
+    const entries = Array.isArray(logs) ? logs : [];
+    if (entries.length === 0) {
+      runLogsConsoleEl.textContent = "";
+      setRunLogsMessage("No log lines yet.");
+      return;
+    }
+
+    const shouldStickToBottom = isScrolledToBottom(runLogsPanelEl);
+    const previousScrollTop = runLogsPanelEl.scrollTop;
+    runLogsConsoleEl.textContent = entries.map(formatLogLine).join("\n");
+    setRunLogsMessage("");
+
+    if (shouldStickToBottom) {
+      runLogsPanelEl.scrollTop = runLogsPanelEl.scrollHeight;
+    } else {
+      runLogsPanelEl.scrollTop = Math.min(previousScrollTop, runLogsPanelEl.scrollHeight);
+    }
+  }
+
+  async function refreshRunLogs(runId) {
+    if (!logsEnabled || !runId) return;
+    if (!runLogsLoaded) {
+      setRunLogsMessage("Loading log lines...");
+    }
+    try {
+      const { resp, payload } = await getJson(
+        `/api/v1/runs/${encodeURIComponent(runId)}/logs?limit=${RUN_LOG_LIMIT}`,
+      );
+      if (resp.ok && payload?.ok && payload?.data?.run_id === runId) {
+        renderRunLogs(payload.data.logs ?? []);
+        runLogsLoaded = true;
+        return;
+      }
+      if (resp.status === 404) {
+        runLogsConsoleEl.textContent = "";
+        setRunLogsMessage("No run found.");
+        runLogsLoaded = true;
+        return;
+      }
+      runLogsConsoleEl.textContent = "";
+      setRunLogsMessage("Unable to load logs right now.");
+      runLogsLoaded = true;
+    } catch {
+      runLogsConsoleEl.textContent = "";
+      setRunLogsMessage("Unable to load logs right now.");
+      runLogsLoaded = true;
+    }
+  }
+
+  function stopRunLogPolling() {
+    if (runLogPollId == null) return;
+    window.clearInterval(runLogPollId);
+    runLogPollId = null;
+  }
+
+  function updateRunLogPolling() {
+    if (!logsEnabled) return;
+    if (!currentRunId) {
+      stopRunLogPolling();
+      lastLogRunId = null;
+      runLogsLoaded = false;
+      runLogsConsoleEl.textContent = "";
+      setRunLogsMessage("Start a run to view recent log lines.");
+      return;
+    }
+
+    const shouldPoll = isPipelineActive(currentRunStatus);
+    if (shouldPoll) {
+      if (runLogPollId == null || lastLogRunId !== currentRunId) {
+        stopRunLogPolling();
+        lastLogRunId = currentRunId;
+        runLogsLoaded = false;
+        void refreshRunLogs(currentRunId);
+        runLogPollId = window.setInterval(() => {
+          void refreshRunLogs(currentRunId);
+        }, RUN_LOG_POLL_MS);
+      }
+      return;
+    }
+
+    stopRunLogPolling();
+    lastLogRunId = currentRunId;
+    runLogsLoaded = false;
+    void refreshRunLogs(currentRunId);
   }
 
   function stopElapsedTimer() {
@@ -249,6 +518,12 @@
     const normalizedName = String(stageName || "");
     const tool = stats && typeof stats === "object" ? stats?.tool ?? null : null;
     const note = stats && typeof stats === "object" ? stats?.note ?? null : null;
+    const effectiveMode = stats && typeof stats === "object" ? stats?.evidence_mode_effective ?? stats?.evidence_mode ?? null : null;
+    const requestedMode = stats && typeof stats === "object" ? stats?.evidence_mode_requested ?? null : null;
+    const modeSnippet =
+      effectiveMode || requestedMode
+        ? `Evidence mode: requested=${formatEvidenceMode(requestedMode)} effective=${formatEvidenceMode(effectiveMode)}`
+        : "";
 
     let text = "";
     if (
@@ -257,6 +532,29 @@
       error?.details?.hint
     ) {
       text = String(error.details.hint);
+    } else if (
+      normalizedName === "annotation" &&
+      error?.code === "EVIDENCE_SOURCES_UNAVAILABLE"
+    ) {
+      const details =
+        error?.details && typeof error.details === "object" ? error.details : {};
+      const missingSources = Array.isArray(details?.missing_sources)
+        ? details.missing_sources.filter((value) => typeof value === "string" && value.trim())
+        : [];
+      const blockedOutputs = Array.isArray(details?.blocked_outputs)
+        ? details.blocked_outputs.filter((value) => typeof value === "string" && value.trim())
+        : [];
+      const parts = [];
+      if (missingSources.length > 0) {
+        parts.push(`Missing evidence sources: ${missingSources.join(", ")}`);
+      }
+      if (blockedOutputs.length > 0) {
+        parts.push(`Blocked outputs: ${blockedOutputs.join(", ")}`);
+      }
+      if (details?.hint) {
+        parts.push(String(details.hint));
+      }
+      text = parts.join(". ");
     } else if (
       normalizedName === "annotation" &&
       error?.code === "SNPEFF_DATADIR_INVALID" &&
@@ -309,8 +607,14 @@
       } else {
         text = "SnpEff completed.";
       }
+    } else if (normalizedName === "reporting" && modeSnippet) {
+      text = modeSnippet;
     } else if (note) {
       text = String(note);
+    }
+
+    if (modeSnippet && normalizedName === "annotation") {
+      text = text ? `${text} ${modeSnippet}` : modeSnippet;
     }
 
     if (!text) {
@@ -497,7 +801,7 @@
       const badgeEl = li.querySelector('[data-role="stage-badge"]');
       if (badgeEl) {
         badgeEl.className = `badge ${stageBadgeClass(status)} rounded-pill`;
-        badgeEl.textContent = formatStageStatus(status);
+        setStatusIndicator(badgeEl, status, formatStageStatus(status));
       }
 
       updateElapsedForRow(li);
@@ -561,19 +865,27 @@
   function resetTaskQueueState() {
     closeEventSource();
     stopElapsedTimer();
+    stopRunLogPolling();
     currentRunId = null;
     currentRunStatus = null;
     currentRunEvidencePolicy = null;
+    currentRunEvidenceModeRequested = null;
+    currentRunEvidenceModeEffective = null;
+    currentRunEvidenceModeReason = null;
     lastStagesSnapshot = null;
     runIdEl.textContent = "\u2014";
-    statusEl.textContent = formatStatus(null);
+    setStatusIndicator(statusEl, null, formatStatus(null));
     referenceBuildEl.textContent = "\u2014";
-    evidencePolicyEl.textContent = "\u2014";
     updateCancelVisibility(null);
     renderStages(null);
     setStagesMessage("Choose a VCF file and press Start.");
     setLiveUpdates(null, "Not connected.");
     clearMessage();
+    if (logsEnabled) {
+      runLogsLoaded = false;
+      runLogsConsoleEl.textContent = "";
+      setRunLogsMessage("Start a run to view recent log lines.");
+    }
   }
 
   async function reconcileAfterReconnect(runId) {
@@ -611,7 +923,15 @@
         const parsed = JSON.parse(ev.data);
         if (parsed?.run_id !== runId) return;
         const status = parsed?.data?.status ?? null;
-        setRun({ run_id: runId, status, reference_build: referenceBuildEl.textContent });
+        setRun({
+          run_id: runId,
+          status,
+          reference_build: referenceBuildEl.textContent,
+          annotation_evidence_policy: currentRunEvidencePolicy,
+          evidence_mode_requested: currentRunEvidenceModeRequested,
+          evidence_mode_effective: currentRunEvidenceModeEffective,
+          evidence_mode_decision_reason: currentRunEvidenceModeReason,
+        });
       } catch {
         // ignore invalid events
       }
@@ -621,8 +941,30 @@
       try {
         const parsed = JSON.parse(ev.data);
         if (parsed?.run_id !== runId) return;
-        // simplest and safest: refetch ordered stages snapshot
+        // Keep stage list and run-level metadata in sync when annotation
+        // preflight updates effective evidence mode telemetry.
         void refreshStagesFromServer(runId);
+        void refreshFromServer(runId);
+      } catch {
+        // ignore invalid events
+      }
+    });
+
+    eventSource.addEventListener("variant_result", (ev) => {
+      try {
+        const parsed = JSON.parse(ev.data);
+        if (parsed?.run_id !== runId) return;
+        const data = parsed?.data ?? {};
+        window.dispatchEvent(
+          new CustomEvent("sp:variant-result", {
+            detail: {
+              run_id: runId,
+              stage_name: data?.stage_name ?? null,
+              status: data?.status ?? null,
+              variants_written: data?.variants_written ?? null,
+            },
+          }),
+        );
       } catch {
         // ignore invalid events
       }
@@ -635,13 +977,18 @@
 
     const status = run?.status ?? null;
     currentRunStatus = status;
-    statusEl.textContent = formatStatus(status);
+    setStatusIndicator(statusEl, status, formatStatus(status));
 
     const referenceBuild = run?.reference_build ?? null;
     referenceBuildEl.textContent = referenceBuild ?? "\u2014";
     const evidencePolicy = run?.annotation_evidence_policy ?? currentRunEvidencePolicy;
     currentRunEvidencePolicy = evidencePolicy ?? null;
-    evidencePolicyEl.textContent = formatEvidencePolicy(evidencePolicy);
+    const evidenceModeRequested = run?.evidence_mode_requested ?? currentRunEvidenceModeRequested;
+    const evidenceModeEffective = run?.evidence_mode_effective ?? currentRunEvidenceModeEffective;
+    const evidenceModeReason = run?.evidence_mode_decision_reason ?? currentRunEvidenceModeReason;
+    currentRunEvidenceModeRequested = evidenceModeRequested ?? null;
+    currentRunEvidenceModeEffective = evidenceModeEffective ?? null;
+    currentRunEvidenceModeReason = evidenceModeReason ?? null;
 
     if (status === "canceled") {
       statusEl.className = "fw-semibold text-danger";
@@ -658,6 +1005,7 @@
     updateCancelVisibility(status);
     updateRetryControl(lastStagesSnapshot);
     ensureEventSource(currentRunId);
+    updateRunLogPolling();
 
     try {
       if (currentRunId) {
@@ -669,6 +1017,9 @@
             created_at: run?.created_at ?? null,
             reference_build: referenceBuild,
             annotation_evidence_policy: evidencePolicy ?? null,
+            evidence_mode_requested: evidenceModeRequested ?? null,
+            evidence_mode_effective: evidenceModeEffective ?? null,
+            evidence_mode_decision_reason: evidenceModeReason ?? null,
           }),
         );
       } else {
@@ -763,6 +1114,10 @@
     } catch {
       setStagesMessage("Unable to load stage status right now.");
     }
+  }
+
+  if (workspaceTabsEl) {
+    workspaceTabsEl.addEventListener("keydown", handleWorkspaceTabKeydown);
   }
 
   if (retryFailedStageBtn) {

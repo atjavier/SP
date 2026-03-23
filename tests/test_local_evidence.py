@@ -65,6 +65,45 @@ class LocalEvidenceTestCase(unittest.TestCase):
         self.assertEqual(result.get("rsid"), "rs555")
         self.assertIn("NC_000001.11:100-100", queried_regions)
 
+    def test_local_clinvar_lookup_missing_db_returns_local_db_missing(self):
+        from pipeline.local_evidence import fetch_clinvar_evidence_from_local_vcf  # noqa: E402
+
+        with patch(
+            "pipeline.local_evidence._extract_matching_vcf_record",
+            side_effect=FileNotFoundError("No local VCF files found under directory: /tmp/clinvar"),
+        ):
+            result = fetch_clinvar_evidence_from_local_vcf(
+                local_vcf_path="/tmp/clinvar",
+                chrom="1",
+                pos=100,
+                ref="A",
+                alt="G",
+                timeout_seconds=5,
+            )
+
+        self.assertEqual(result.get("outcome"), "error")
+        self.assertEqual(result.get("reason_code"), "LOCAL_DB_MISSING")
+        self.assertIn("/tmp/clinvar", str((result.get("details") or {}).get("local_vcf_path")))
+
+    def test_local_gnomad_lookup_not_found_returns_not_found_without_error(self):
+        from pipeline.local_evidence import fetch_gnomad_evidence_from_local_vcf  # noqa: E402
+
+        with patch(
+            "pipeline.local_evidence._extract_matching_vcf_record",
+            return_value=None,
+        ):
+            result = fetch_gnomad_evidence_from_local_vcf(
+                local_vcf_path="/tmp/gnomad/chr1.vcf.bgz",
+                chrom="1",
+                pos=100,
+                ref="A",
+                alt="G",
+                timeout_seconds=5,
+            )
+
+        self.assertEqual(result.get("outcome"), "not_found")
+        self.assertEqual(result.get("reason_code"), "NOT_FOUND")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -26,6 +26,34 @@ class OrchestratorError(Exception):
         self.details = details or {}
 
 
+def _build_reporting_stats(db_path: str, run_id: str) -> dict:
+    annotation_stage = get_stage(db_path, run_id, "annotation") or {}
+    annotation_stats = annotation_stage.get("stats")
+    if not isinstance(annotation_stats, dict):
+        return {"status": "completed"}
+
+    reporting_stats: dict = {"status": "completed"}
+    for key in (
+        "annotation_evidence_completeness",
+        "annotation_evidence_policy",
+        "evidence_mode_requested",
+        "evidence_mode_effective",
+        "evidence_mode_decision_reason",
+        "evidence_online_available",
+        "evidence_offline_sources_configured",
+        "evidence_source_completeness",
+        "evidence_source_completeness_reason",
+        "evidence_failed_sources",
+        "evidence_complete_sources",
+        "evidence_partial_sources",
+        "evidence_unavailable_sources",
+    ):
+        value = annotation_stats.get(key)
+        if value is not None:
+            reporting_stats[key] = value
+    return reporting_stats
+
+
 def prepare_pipeline_start(db_path: str, run_id: str) -> dict:
     run = get_run(db_path, run_id)
     if not run:
@@ -85,6 +113,38 @@ def run_pipeline(
     logger,
     prediction_config: dict | None = None,
 ) -> dict:
+    from run_logging import log_run_event
+
+    def _log_stage_start(stage_name: str) -> None:
+        log_run_event(
+            logger,
+            "stage_start",
+            f"Stage {stage_name} started.",
+            stage_name=stage_name,
+            status="running",
+        )
+
+    def _log_stage_success(stage_name: str) -> None:
+        log_run_event(
+            logger,
+            "stage_success",
+            f"Stage {stage_name} succeeded.",
+            stage_name=stage_name,
+            status="succeeded",
+        )
+
+    def _log_stage_failure(stage_name: str, code: str, message: str, details: dict | None = None) -> None:
+        log_run_event(
+            logger,
+            "stage_failed",
+            f"Stage {stage_name} failed.",
+            stage_name=stage_name,
+            status="failed",
+            error_code=code,
+            error_message=message,
+            details=details or {},
+        )
+
     prepared = prepare_pipeline_start(db_path, run_id)
     run = prepared.get("run") or {}
     annotation_evidence_policy = run.get("annotation_evidence_policy")
@@ -108,6 +168,7 @@ def run_pipeline(
             raise OrchestratorError(409, "RUN_CANCELED", "Run was canceled.")
 
         if stage_name == "parser":
+            _log_stage_start(stage_name)
             try:
                 run_parser_stage(
                     db_path,
@@ -121,16 +182,19 @@ def run_pipeline(
             except StageExecutionError as exc:
                 if exc.code == "ALREADY_PARSED":
                     continue
+                _log_stage_failure(stage_name, exc.code, exc.message, exc.details)
                 raise OrchestratorError(exc.http_status, exc.code, exc.message, details=exc.details) from None
 
             latest_after = get_run(db_path, run_id)
             if latest_after and latest_after.get("status") == "canceled":
                 raise OrchestratorError(409, "RUN_CANCELED", "Run was canceled.")
 
+            _log_stage_success(stage_name)
             executed.append(stage_name)
             continue
 
         if stage_name == "pre_annotation":
+            _log_stage_start(stage_name)
             try:
                 run_pre_annotation_stage(
                     db_path,
@@ -142,16 +206,19 @@ def run_pipeline(
             except StageExecutionError as exc:
                 if exc.code == "ALREADY_PRE_ANNOTATED":
                     continue
+                _log_stage_failure(stage_name, exc.code, exc.message, exc.details)
                 raise OrchestratorError(exc.http_status, exc.code, exc.message, details=exc.details) from None
 
             latest_after = get_run(db_path, run_id)
             if latest_after and latest_after.get("status") == "canceled":
                 raise OrchestratorError(409, "RUN_CANCELED", "Run was canceled.")
 
+            _log_stage_success(stage_name)
             executed.append(stage_name)
             continue
 
         if stage_name == "classification":
+            _log_stage_start(stage_name)
             try:
                 run_classification_stage(
                     db_path,
@@ -164,16 +231,19 @@ def run_pipeline(
             except StageExecutionError as exc:
                 if exc.code == "ALREADY_CLASSIFIED":
                     continue
+                _log_stage_failure(stage_name, exc.code, exc.message, exc.details)
                 raise OrchestratorError(exc.http_status, exc.code, exc.message, details=exc.details) from None
 
             latest_after = get_run(db_path, run_id)
             if latest_after and latest_after.get("status") == "canceled":
                 raise OrchestratorError(409, "RUN_CANCELED", "Run was canceled.")
 
+            _log_stage_success(stage_name)
             executed.append(stage_name)
             continue
 
         if stage_name == "prediction":
+            _log_stage_start(stage_name)
             try:
                 run_prediction_stage(
                     db_path,
@@ -186,16 +256,19 @@ def run_pipeline(
             except StageExecutionError as exc:
                 if exc.code == "ALREADY_PREDICTED":
                     continue
+                _log_stage_failure(stage_name, exc.code, exc.message, exc.details)
                 raise OrchestratorError(exc.http_status, exc.code, exc.message, details=exc.details) from None
 
             latest_after = get_run(db_path, run_id)
             if latest_after and latest_after.get("status") == "canceled":
                 raise OrchestratorError(409, "RUN_CANCELED", "Run was canceled.")
 
+            _log_stage_success(stage_name)
             executed.append(stage_name)
             continue
 
         if stage_name == "annotation":
+            _log_stage_start(stage_name)
             try:
                 run_annotation_stage(
                     db_path,
@@ -208,16 +281,19 @@ def run_pipeline(
             except StageExecutionError as exc:
                 if exc.code == "ALREADY_ANNOTATED":
                     continue
+                _log_stage_failure(stage_name, exc.code, exc.message, exc.details)
                 raise OrchestratorError(exc.http_status, exc.code, exc.message, details=exc.details) from None
 
             latest_after = get_run(db_path, run_id)
             if latest_after and latest_after.get("status") == "canceled":
                 raise OrchestratorError(409, "RUN_CANCELED", "Run was canceled.")
 
+            _log_stage_success(stage_name)
             executed.append(stage_name)
             continue
 
         try:
+            _log_stage_start(stage_name)
             mark_stage_running(db_path, run_id, stage_name, input_uploaded_at=uploaded_at)
 
             latest_after_start = get_run(db_path, run_id)
@@ -225,12 +301,16 @@ def run_pipeline(
                 mark_stage_canceled(db_path, run_id, stage_name, input_uploaded_at=uploaded_at)
                 raise OrchestratorError(409, "RUN_CANCELED", "Run was canceled.")
 
+            stage_stats = {"status": "completed"}
+            if stage_name == "reporting":
+                stage_stats = _build_reporting_stats(db_path, run_id)
+
             mark_stage_succeeded(
                 db_path,
                 run_id,
                 stage_name,
                 input_uploaded_at=uploaded_at,
-                stats={"status": "completed"},
+                stats=stage_stats,
             )
             stage_after = get_stage(db_path, run_id, stage_name)
             if stage_after and stage_after.get("status") == "canceled":
@@ -243,6 +323,12 @@ def run_pipeline(
             raise
         except Exception as exc:
             logger.exception("Stage execution failed: %s", stage_name)
+            _log_stage_failure(
+                stage_name,
+                "STAGE_FAILED",
+                "Stage execution failed.",
+                {"reason": str(exc)},
+            )
             mark_stage_failed(
                 db_path,
                 run_id,
@@ -253,6 +339,7 @@ def run_pipeline(
                 error_details={"reason": str(exc)},
             )
             raise OrchestratorError(500, "STAGE_FAILED", "Stage execution failed.") from None
+        _log_stage_success(stage_name)
         executed.append(stage_name)
 
     return {

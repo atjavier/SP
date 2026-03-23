@@ -57,6 +57,11 @@ class OrchestratorApiTestCase(unittest.TestCase):
             time.sleep(0.01)
         self.fail("Timed out waiting for run to stop running.")
 
+    def _read_run_logs(self, instance_dir: str, run_id: str):
+        log_path = os.path.join(instance_dir, "logs", "runs", f"{run_id}.log")
+        with open(log_path, "r", encoding="utf-8") as handle:
+            return [json.loads(line) for line in handle if line.strip()]
+
     def test_start_runs_all_stages_and_resets_run_to_queued(self):
         vcf_bytes = b"##fileformat=VCFv4.2\n#CHROM\tPOS\tREF\tALT\n1\t1\tA\tT\n"
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -85,6 +90,24 @@ class OrchestratorApiTestCase(unittest.TestCase):
             self.assertEqual(prediction_stats["outputs_persisted_by_predictor"]["polyphen2"], 1)
             self.assertEqual(prediction_stats["outputs_persisted_by_predictor"]["alphamissense"], 1)
 
+            annotation_stats = by_name["annotation"]["stats"]
+            self.assertIn("annotation_evidence_completeness", annotation_stats)
+            self.assertIn("evidence_source_completeness", annotation_stats)
+
+            reporting_stats = by_name["reporting"]["stats"]
+            self.assertEqual(
+                reporting_stats.get("annotation_evidence_completeness"),
+                annotation_stats.get("annotation_evidence_completeness"),
+            )
+            self.assertEqual(
+                reporting_stats.get("annotation_evidence_policy"),
+                annotation_stats.get("annotation_evidence_policy"),
+            )
+            self.assertEqual(
+                reporting_stats.get("evidence_source_completeness"),
+                annotation_stats.get("evidence_source_completeness"),
+            )
+
             conn = sqlite3.connect(db_path)
             try:
                 sift_count = conn.execute(
@@ -109,12 +132,128 @@ class OrchestratorApiTestCase(unittest.TestCase):
                 self.assertEqual(stage["status"], "succeeded")
                 self.assertIsInstance(stage.get("started_at"), str)
                 self.assertIsInstance(stage.get("completed_at"), str)
-
                 started = datetime.fromisoformat(stage["started_at"])
                 completed = datetime.fromisoformat(stage["completed_at"])
                 self.assertIsNotNone(started.tzinfo)
-                self.assertIsNotNone(completed.tzinfo)
-                self.assertGreaterEqual(completed, started)
+            self.assertIsNotNone(completed.tzinfo)
+            self.assertGreaterEqual(completed, started)
+
+    def test_start_emits_run_and_stage_logs(self):
+        vcf_bytes = b"##fileformat=VCFv4.2\n#CHROM\tPOS\tREF\tALT\n1\t1\tA\tT\n"
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = os.path.join(tmpdir, "sp.db")
+            client = self._create_client(db_path)
+
+            run_id = self._create_run(client)
+            self.assertEqual(self._upload(client, run_id, vcf_bytes).status_code, 200)
+            resp = client.post(f"/api/v1/runs/{run_id}/start")
+            self.assertEqual(resp.status_code, 200)
+            self.assertEqual(self._wait_for_run_not_running(client, run_id), "queued")
+
+            entries = []
+            deadline = time.time() + 5.0
+            while time.time() < deadline:
+                entries = self._read_run_logs(tmpdir, run_id)
+                if any(entry.get("event") == "run_finalize" for entry in entries):
+                    break
+                time.sleep(0.05)
+            events = [entry.get("event") for entry in entries]
+            self.assertIn("run_start", events)
+            self.assertIn("run_finalize", events)
+            self.assertTrue(
+                any(
+                    entry.get("event") == "stage_start" and entry.get("stage_name") == "parser"
+                    for entry in entries
+                )
+            )
+            self.assertTrue(
+                any(
+                    entry.get("event") == "stage_success" and entry.get("stage_name") == "parser"
+                    for entry in entries
+                )
+            )
+
+    def test_cancel_emits_run_cancel_log(self):
+        vcf_bytes = b"#CHROM\tPOS\tREF\tALT\n1\t1\tA\tT\n"
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = os.path.join(tmpdir, "sp.db")
+            client = self._create_client(db_path)
+
+            run_id = self._create_run(client)
+            self.assertEqual(self._upload(client, run_id, vcf_bytes).status_code, 200)
+
+            entered = threading.Event()
+            release = threading.Event()
+
+            import pipeline.parser_stage as parser_stage  # noqa: E402
+
+            original_iter = parser_stage.iter_vcf_snv_records
+
+            def gated_iter(*args, **kwargs):
+                entered.set()
+                if not release.wait(timeout=5.0):
+                    raise RuntimeError("Timed out waiting for test to release parser stage.")
+                yield from original_iter(*args, **kwargs)
+
+            with patch("pipeline.parser_stage.iter_vcf_snv_records", side_effect=gated_iter):
+                self.assertEqual(client.post(f"/api/v1/runs/{run_id}/start").status_code, 200)
+                self.assertTrue(entered.wait(timeout=5.0))
+                self.assertEqual(client.post(f"/api/v1/runs/{run_id}/cancel").status_code, 200)
+                release.set()
+                self.assertEqual(self._wait_for_run_not_running(client, run_id), "canceled")
+
+            entries = []
+            deadline = time.time() + 5.0
+            while time.time() < deadline:
+                entries = self._read_run_logs(tmpdir, run_id)
+                if any(entry.get("event") == "run_finalize" for entry in entries):
+                    break
+                time.sleep(0.05)
+            self.assertTrue(
+                any(entry.get("event") == "run_cancel" and entry.get("status") == "canceled" for entry in entries)
+            )
+
+    def test_start_retries_terminal_status_update_on_transient_db_lock(self):
+        vcf_bytes = b"##fileformat=VCFv4.2\n#CHROM\tPOS\tREF\tALT\n1\t1\tA\tT\n"
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = os.path.join(tmpdir, "sp.db")
+            client = self._create_client(db_path)
+
+            run_id = self._create_run(client)
+            self.assertEqual(self._upload(client, run_id, vcf_bytes).status_code, 200)
+
+            from storage import runs as runs_storage  # noqa: E402
+
+            original_set_status = runs_storage.set_run_status_if_not_canceled
+            attempts = {"count": 0}
+
+            def flaky_set_status(*args, **kwargs):
+                if attempts["count"] == 0:
+                    attempts["count"] += 1
+                    raise sqlite3.OperationalError("database is locked")
+                attempts["count"] += 1
+                return original_set_status(*args, **kwargs)
+
+            with patch("storage.runs.set_run_status_if_not_canceled", side_effect=flaky_set_status):
+                resp = client.post(f"/api/v1/runs/{run_id}/start")
+                self.assertEqual(resp.status_code, 200)
+                self.assertEqual(self._wait_for_run_not_running(client, run_id), "queued")
+                self.assertGreaterEqual(attempts["count"], 2)
+
+    def test_start_marks_run_failed_when_pipeline_crashes_unexpectedly(self):
+        vcf_bytes = b"##fileformat=VCFv4.2\n#CHROM\tPOS\tREF\tALT\n1\t1\tA\tT\n"
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = os.path.join(tmpdir, "sp.db")
+            client = self._create_client(db_path)
+
+            run_id = self._create_run(client)
+            self.assertEqual(self._upload(client, run_id, vcf_bytes).status_code, 200)
+
+            with patch("pipeline.orchestrator.run_pipeline", side_effect=RuntimeError("boom")):
+                resp = client.post(f"/api/v1/runs/{run_id}/start")
+                self.assertEqual(resp.status_code, 200)
+                self.assertEqual(self._wait_for_run_not_running(client, run_id), "failed")
 
             # run already awaited above
 
@@ -206,6 +345,19 @@ class OrchestratorApiTestCase(unittest.TestCase):
             self.assertEqual(items[0]["variant_key"], "1:1:A>G")
             self.assertEqual(items[0]["consequence_category"], "missense")
             self.assertIsNone(items[0]["reason_code"])
+            variant_id = items[0]["variant_id"]
+
+            by_variant_listing = client.get(
+                f"/api/v1/runs/{run_id}/classifications?variant_id={variant_id}&limit=10"
+            )
+            self.assertEqual(by_variant_listing.status_code, 200)
+            by_variant_payload = json.loads(by_variant_listing.get_data(as_text=True))
+            self.assertIs(by_variant_payload.get("ok"), True)
+            self.assertEqual(by_variant_payload["data"]["run_id"], run_id)
+            self.assertEqual(by_variant_payload["data"]["variant_id"], variant_id)
+            by_variant_items = by_variant_payload["data"]["classifications"]
+            self.assertEqual(len(by_variant_items), 1)
+            self.assertEqual(by_variant_items[0]["variant_id"], variant_id)
 
     def test_predictor_outputs_endpoint_is_stage_gated_to_latest_upload(self):
         vcf_bytes_1 = b"#CHROM\tPOS\tREF\tALT\n1\t1\tA\tT\n"
@@ -322,6 +474,10 @@ class OrchestratorApiTestCase(unittest.TestCase):
             self.assertIn('id="variant-pred-polyphen2-outcome"', html)
             self.assertIn('id="variant-pred-alphamissense-outcome"', html)
             self.assertIn('id="prediction-show-not-applicable"', html)
+            self.assertIn('data-stage="pre_annotation"', html)
+            self.assertIn('data-stage="classification"', html)
+            self.assertIn('data-stage="prediction"', html)
+            self.assertIn('data-stage="annotation"', html)
 
     def test_pre_annotations_endpoint_returns_rows_and_gates_to_latest_upload(self):
         vcf_bytes = b"#CHROM\tPOS\tREF\tALT\n1\t1\tA\tG\n"
@@ -481,6 +637,7 @@ class OrchestratorApiTestCase(unittest.TestCase):
                     "SP_SNPEFF_ENABLED": "0",
                     "SP_DBSNP_ENABLED": "0",
                     "SP_CLINVAR_ENABLED": "1",
+                    "SP_EVIDENCE_CONNECTIVITY_PROBE_ENABLED": "0",
                     "SP_CLINVAR_TIMEOUT_SECONDS": "5",
                     "SP_CLINVAR_RETRY_MAX_ATTEMPTS": "3",
                     "SP_CLINVAR_RETRY_BACKOFF_BASE_SECONDS": "0",
@@ -584,6 +741,7 @@ class OrchestratorApiTestCase(unittest.TestCase):
                     "SP_DBSNP_ENABLED": "0",
                     "SP_CLINVAR_ENABLED": "0",
                     "SP_GNOMAD_ENABLED": "1",
+                    "SP_EVIDENCE_CONNECTIVITY_PROBE_ENABLED": "0",
                     "SP_GNOMAD_TIMEOUT_SECONDS": "5",
                     "SP_GNOMAD_RETRY_MAX_ATTEMPTS": "3",
                     "SP_GNOMAD_RETRY_BACKOFF_BASE_SECONDS": "0",
@@ -637,6 +795,72 @@ class OrchestratorApiTestCase(unittest.TestCase):
             stale_payload = json.loads(stale_listing.get_data(as_text=True))
             self.assertIs(stale_payload.get("ok"), True)
             self.assertEqual(stale_payload["data"]["gnomad_evidence"], [])
+
+    def test_start_blocks_reporting_when_annotation_has_no_valid_evidence_sources(self):
+        vcf_bytes = b"#CHROM\tPOS\tREF\tALT\n1\t1\tA\tG\n"
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = os.path.join(tmpdir, "sp.db")
+            client = self._create_client(db_path)
+
+            run_id = self._create_run(client)
+            self.assertEqual(self._upload(client, run_id, vcf_bytes).status_code, 200)
+
+            forced_decision = {
+                "requested_mode": "online",
+                "effective_mode": "online",
+                "online_available": False,
+                "offline_sources_configured": {"dbsnp": False, "clinvar": False, "gnomad": False},
+                "offline_sources_available": {"dbsnp": False, "clinvar": False, "gnomad": False},
+                "offline_sources_unavailable_reason": {"dbsnp": "", "clinvar": "", "gnomad": ""},
+                "decision_reason": "requested_online_no_valid_source",
+                "detected_at": "2026-03-10T00:00:00+00:00",
+            }
+
+            with patch.dict(
+                os.environ,
+                {
+                    "SP_SNPEFF_ENABLED": "0",
+                    "SP_DBSNP_ENABLED": "1",
+                    "SP_CLINVAR_ENABLED": "1",
+                    "SP_GNOMAD_ENABLED": "1",
+                },
+                clear=False,
+            ):
+                with (
+                    patch("pipeline.annotation_stage._detect_evidence_mode_decision", return_value=forced_decision),
+                    patch(
+                        "pipeline.annotation_stage._fetch_dbsnp_evidence",
+                        side_effect=AssertionError("dbSNP retrieval should be skipped"),
+                    ),
+                    patch(
+                        "pipeline.annotation_stage._fetch_clinvar_evidence",
+                        side_effect=AssertionError("ClinVar retrieval should be skipped"),
+                    ),
+                    patch(
+                        "pipeline.annotation_stage._fetch_gnomad_evidence",
+                        side_effect=AssertionError("gnomAD retrieval should be skipped"),
+                    ),
+                ):
+                    self.assertEqual(client.post(f"/api/v1/runs/{run_id}/start").status_code, 200)
+                    self.assertEqual(self._wait_for_run_not_running(client, run_id), "failed")
+
+            stages_payload = json.loads(client.get(f"/api/v1/runs/{run_id}/stages").get_data(as_text=True))
+            by_name = {stage["stage_name"]: stage for stage in stages_payload["data"]["stages"]}
+
+            annotation_stage = by_name["annotation"]
+            self.assertEqual(annotation_stage["status"], "failed")
+            self.assertEqual(annotation_stage["error"]["code"], "EVIDENCE_SOURCES_UNAVAILABLE")
+            self.assertEqual(sorted(annotation_stage["error"]["details"]["missing_sources"]), ["clinvar", "dbsnp", "gnomad"])
+            self.assertEqual(annotation_stage["error"]["details"]["blocked_outputs"], ["annotation", "reporting"])
+
+            self.assertEqual(by_name["reporting"]["status"], "queued")
+
+            annotation_output = json.loads(
+                client.get(f"/api/v1/runs/{run_id}/annotation_output?limit=20").get_data(as_text=True)
+            )
+            self.assertTrue(annotation_output["ok"])
+            self.assertEqual(annotation_output["data"]["stage"]["status"], "failed")
+            self.assertEqual(annotation_output["data"]["preview_lines"], [])
 
     def test_start_begins_at_pre_annotation_when_parser_already_succeeded(self):
         vcf_bytes = b"#CHROM\tPOS\tREF\tALT\n1\t1\tA\tT\n"

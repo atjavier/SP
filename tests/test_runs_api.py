@@ -38,6 +38,12 @@ class RunsApiTestCase(unittest.TestCase):
             self.assertEqual(data.get("status"), "queued")
             self.assertEqual(data.get("reference_build"), "GRCh38")
             self.assertEqual(data.get("annotation_evidence_policy"), "continue")
+            self.assertEqual(data.get("evidence_mode_requested"), "online")
+            self.assertIsNone(data.get("evidence_mode_effective"))
+            self.assertIsNone(data.get("evidence_online_available"))
+            self.assertEqual(data.get("evidence_offline_sources_configured"), {"dbsnp": False, "clinvar": False, "gnomad": False})
+            self.assertEqual(data.get("evidence_mode_decision_reason"), "not_evaluated")
+            self.assertIsNone(data.get("evidence_mode_detected_at"))
 
             created_at = data.get("created_at")
             self.assertIsInstance(created_at, str)
@@ -49,7 +55,18 @@ class RunsApiTestCase(unittest.TestCase):
             try:
                 row = conn.execute(
                     """
-                    SELECT run_id, status, created_at, reference_build, annotation_evidence_policy
+                    SELECT
+                      run_id,
+                      status,
+                      created_at,
+                      reference_build,
+                      annotation_evidence_policy,
+                      evidence_mode_requested,
+                      evidence_mode_effective,
+                      evidence_online_available,
+                      evidence_offline_sources_configured_json,
+                      evidence_mode_decision_reason,
+                      evidence_mode_detected_at
                     FROM runs
                     WHERE run_id = ?
                     """,
@@ -60,6 +77,12 @@ class RunsApiTestCase(unittest.TestCase):
             self.assertIsNotNone(row)
             self.assertEqual(row[3], "GRCh38")
             self.assertEqual(row[4], "continue")
+            self.assertEqual(row[5], "online")
+            self.assertIsNone(row[6])
+            self.assertIsNone(row[7])
+            self.assertIn('"dbsnp":false', row[8])
+            self.assertEqual(row[9], "not_evaluated")
+            self.assertIsNone(row[10])
 
     def test_cancel_run_transitions_queued_to_canceled_and_persists(self):
         import sys
@@ -76,18 +99,23 @@ class RunsApiTestCase(unittest.TestCase):
             self.assertEqual(created["status"], "queued")
             self.assertEqual(created["reference_build"], "GRCh38")
             self.assertEqual(created["annotation_evidence_policy"], "continue")
+            self.assertEqual(created["evidence_mode_requested"], "online")
+            self.assertIsNone(created["evidence_mode_effective"])
+            self.assertEqual(created["evidence_offline_sources_configured"], {"dbsnp": False, "clinvar": False, "gnomad": False})
 
             canceled = cancel_run(db_path, created["run_id"])
             self.assertEqual(canceled["run_id"], created["run_id"])
             self.assertEqual(canceled["status"], "canceled")
             self.assertEqual(canceled["reference_build"], "GRCh38")
             self.assertEqual(canceled["annotation_evidence_policy"], "continue")
+            self.assertEqual(canceled["evidence_mode_requested"], "online")
 
             fetched = get_run(db_path, created["run_id"])
             self.assertIsNotNone(fetched)
             self.assertEqual(fetched["status"], "canceled")
             self.assertEqual(fetched["reference_build"], "GRCh38")
             self.assertEqual(fetched["annotation_evidence_policy"], "continue")
+            self.assertEqual(fetched["evidence_mode_requested"], "online")
 
     def test_cancel_run_clears_gnomad_evidence_rows(self):
         import sys
@@ -192,6 +220,7 @@ class RunsApiTestCase(unittest.TestCase):
             run_id = created_payload["data"]["run_id"]
             self.assertEqual(created_payload["data"]["reference_build"], "GRCh38")
             self.assertEqual(created_payload["data"]["annotation_evidence_policy"], "continue")
+            self.assertEqual(created_payload["data"]["evidence_mode_requested"], "online")
 
             cancel_resp = client.post(f"/api/v1/runs/{run_id}/cancel")
             self.assertEqual(cancel_resp.status_code, 200)
@@ -201,6 +230,7 @@ class RunsApiTestCase(unittest.TestCase):
             self.assertEqual(cancel_payload["data"]["status"], "canceled")
             self.assertEqual(cancel_payload["data"]["reference_build"], "GRCh38")
             self.assertEqual(cancel_payload["data"]["annotation_evidence_policy"], "continue")
+            self.assertEqual(cancel_payload["data"]["evidence_mode_requested"], "online")
 
             stages_resp = client.get(f"/api/v1/runs/{run_id}/stages")
             self.assertEqual(stages_resp.status_code, 200)
@@ -334,6 +364,8 @@ class RunsApiTestCase(unittest.TestCase):
             self.assertEqual(payload["data"]["run_id"], run_id)
             self.assertEqual(payload["data"]["reference_build"], "GRCh38")
             self.assertEqual(payload["data"]["annotation_evidence_policy"], "continue")
+            self.assertEqual(payload["data"]["evidence_mode_requested"], "online")
+            self.assertIsNone(payload["data"]["evidence_mode_effective"])
 
     def test_get_run_unknown_returns_404(self):
         import sys
@@ -387,6 +419,8 @@ class RunsApiTestCase(unittest.TestCase):
             self.assertIsNotNone(record)
             self.assertEqual(record["reference_build"], "GRCh38")
             self.assertEqual(record["annotation_evidence_policy"], "continue")
+            self.assertEqual(record["evidence_mode_requested"], "online")
+            self.assertIsNone(record["evidence_mode_effective"])
 
     def test_schema_migration_uses_legacy_strict_env_for_annotation_policy(self):
         import sys
@@ -668,7 +702,7 @@ class RunsApiTestCase(unittest.TestCase):
             run_resp = client.get(f"/api/v1/runs/{run_id}")
             self.assertEqual(run_resp.status_code, 200)
             run_payload = json.loads(run_resp.get_data(as_text=True))
-            self.assertEqual(run_payload["data"]["status"], "queued")
+            self.assertEqual(run_payload["data"]["status"], "failed")
 
             stages_resp = client.get(f"/api/v1/runs/{run_id}/stages")
             self.assertEqual(stages_resp.status_code, 200)

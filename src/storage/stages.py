@@ -342,10 +342,12 @@ def mark_stage_failed(
     error_code: str,
     error_message: str,
     error_details: dict | None = None,
+    stats: dict | None = None,
     conn: sqlite3.Connection | None = None,
     commit: bool = True,
 ) -> None:
     completed_at = datetime.now(timezone.utc).isoformat()
+    stats_json = json.dumps(stats) if stats is not None else None
     with _maybe_connection(db_path, conn) as active:
         init_schema(active)
         active.execute(
@@ -354,12 +356,12 @@ def mark_stage_failed(
               run_id, stage_name, status, started_at, completed_at, input_uploaded_at,
               stats_json, error_code, error_message, error_details_json
             )
-            VALUES (?, ?, ?, NULL, ?, ?, NULL, ?, ?, ?)
+            VALUES (?, ?, ?, NULL, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(run_id, stage_name) DO UPDATE SET
               status = excluded.status,
               completed_at = excluded.completed_at,
               input_uploaded_at = excluded.input_uploaded_at,
-              stats_json = NULL,
+              stats_json = excluded.stats_json,
               error_code = excluded.error_code,
               error_message = excluded.error_message,
               error_details_json = excluded.error_details_json
@@ -371,6 +373,7 @@ def mark_stage_failed(
                 "failed",
                 completed_at,
                 input_uploaded_at,
+                stats_json,
                 error_code,
                 error_message,
                 json.dumps(error_details or {}),
