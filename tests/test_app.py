@@ -45,6 +45,7 @@ class AppTestCase(unittest.TestCase):
         self.assertIn("Workspace", html)
         self.assertIn("Progress", html)
         self.assertIn("Results", html)
+        self.assertIn("Run summary", html)
 
         self.assertIn("id=\"upload-section\"", html)
         self.assertIn("id=\"workspace-section\"", html)
@@ -61,6 +62,9 @@ class AppTestCase(unittest.TestCase):
         self.assertIn("id=\"new-run-btn\"", html)
         self.assertIn("id=\"upload-validation-message\"", html)
         self.assertIn("id=\"upload-validation-results\"", html)
+        self.assertRegex(html, r'id="upload-validation-results"[^>]*role="status"')
+        self.assertRegex(html, r'id="upload-validation-results"[^>]*aria-live="polite"')
+        self.assertRegex(html, r'id="upload-validation-results"[^>]*aria-label="Validation details"')
 
         self.assertIn("Cancel run", html)
         self.assertIn("id=\"cancel-run-btn\"", html)
@@ -90,6 +94,69 @@ class AppTestCase(unittest.TestCase):
 
         self.assertNotIn("id=\"upload-validate-btn\"", html)
         self.assertNotIn("id=\"start-run-btn\"", html)
+
+    def test_index_includes_accessible_table_captions_and_controls(self):
+        import app as sp_app
+
+        flask_app = sp_app.create_app()
+        client = flask_app.test_client()
+        resp = client.get("/")
+        html = resp.get_data(as_text=True)
+
+        for caption in [
+            "Variant summary table",
+            "Pre-annotation results table",
+            "Classification results table",
+            "Classification input VCF preview table",
+            "Prediction results table",
+            "Prediction input VCF preview table",
+            "Annotation diagnostics table",
+            "dbSNP evidence results table",
+            "ClinVar evidence results table",
+            "gnomAD evidence results table",
+            "Annotated VCF preview table",
+        ]:
+            self.assertIn(caption, html)
+
+        self.assertIn('aria-label="Workspace tabs"', html)
+        self.assertIn('aria-label="Results stage tabs"', html)
+        self.assertIn('aria-label="Previous variant summary page"', html)
+        self.assertIn('aria-label="Next variant summary page"', html)
+        self.assertIn('aria-label="Search classification input VCF by position"', html)
+        self.assertIn('aria-label="Search prediction input VCF by position"', html)
+        self.assertIn('aria-label="Search annotated VCF by position"', html)
+        self.assertIn('aria-labelledby="html-artifacts-heading"', html)
+
+    def test_index_includes_tooltip_glossary_markers(self):
+        import app as sp_app
+
+        flask_app = sp_app.create_app()
+        client = flask_app.test_client()
+        resp = client.get("/")
+        html = resp.get_data(as_text=True)
+
+        self.assertIn("/static/tooltip_controls.js", html)
+        self.assertIn('data-tooltip-key="section.run_summary"', html)
+        self.assertIn('data-tooltip-key="stage.parser"', html)
+        self.assertIn('data-tooltip-key="term.completeness"', html)
+        self.assertIn('data-tooltip-key="provenance.retrieved"', html)
+        self.assertIn('data-tooltip-key="evidence_policy.stop"', html)
+        self.assertIn('data-tooltip-key="evidence_policy.continue"', html)
+
+    def test_tooltip_controls_script_exposes_glossary(self):
+        import app as sp_app
+
+        flask_app = sp_app.create_app()
+        client = flask_app.test_client()
+        resp = client.get("/static/tooltip_controls.js")
+        self.assertEqual(resp.status_code, 200)
+        script = resp.get_data(as_text=True)
+        resp.close()
+
+        self.assertIn("TOOLTIP_GLOSSARY", script)
+        self.assertIn("section.run_summary", script)
+        self.assertIn("stage.parser", script)
+        self.assertIn("status.succeeded", script)
 
     def test_results_controls_has_drawer_failure_resume_guard(self):
         import app as sp_app
@@ -233,6 +300,8 @@ class AppTestCase(unittest.TestCase):
 
         self.assertIn(".status-indicator", css)
         self.assertIn(".status-icon", css)
+        self.assertIn(".workspace-block", css)
+        self.assertIn(".workspace-block-title", css)
 
     def test_run_controls_uses_status_indicator_helper(self):
         import app as sp_app
@@ -284,6 +353,81 @@ class AppTestCase(unittest.TestCase):
         self.assertIn("Unavailable", script)
         self.assertIn("Not applicable", script)
         self.assertIn("Not available", script)
+
+    def test_docs_route_returns_200(self):
+        import app as sp_app
+
+        flask_app = sp_app.create_app()
+        client = flask_app.test_client()
+        resp = client.get("/docs")
+        self.assertEqual(resp.status_code, 200)
+
+    def test_nav_includes_docs_link(self):
+        import app as sp_app
+
+        flask_app = sp_app.create_app()
+        client = flask_app.test_client()
+        resp = client.get("/")
+        html = resp.get_data(as_text=True)
+        self.assertIn('href="/docs"', html)
+        self.assertIn('aria-label="Docs"', html)
+
+    def test_branding_and_sidebar_toggle(self):
+        import app as sp_app
+
+        flask_app = sp_app.create_app()
+        client = flask_app.test_client()
+        resp = client.get("/")
+        html = resp.get_data(as_text=True)
+
+        self.assertIn("BioEvidence", html)
+        self.assertIn("Teach and trace SNV outcomes.", html)
+        self.assertIn("<title>BioEvidence", html)
+        self.assertIn('id="sidebar-toggle"', html)
+        self.assertIn('aria-controls="app-sidebar"', html)
+
+        resp = client.get("/docs")
+        docs_html = resp.get_data(as_text=True)
+        self.assertIn("BioEvidence Documentation", docs_html)
+        self.assertIn("Teach and trace SNV outcomes.", docs_html)
+
+    def test_sidebar_controls_script_served(self):
+        import app as sp_app
+
+        flask_app = sp_app.create_app()
+        client = flask_app.test_client()
+        resp = client.get("/static/sidebar_controls.js")
+        self.assertEqual(resp.status_code, 200)
+        script = resp.get_data(as_text=True)
+        resp.close()
+
+        self.assertIn("sp_sidebar_collapsed", script)
+
+    def test_docs_contains_required_sections_and_anchors(self):
+        import app as sp_app
+
+        flask_app = sp_app.create_app()
+        client = flask_app.test_client()
+        resp = client.get("/docs")
+        html = resp.get_data(as_text=True)
+
+        self.assertIn("Getting Started", html)
+        self.assertIn("Pipeline Stages", html)
+        self.assertIn("Tools and Evidence Sources", html)
+        self.assertIn("Evidence Modes and Policy", html)
+        self.assertIn("Results Interpretation and Provenance", html)
+        self.assertIn("Troubleshooting and FAQ", html)
+
+        for anchor in [
+            "docs-getting-started",
+            "docs-pipeline-stages",
+            "docs-tools-evidence",
+            "docs-evidence-modes",
+            "docs-results-provenance",
+            "docs-troubleshooting",
+        ]:
+            self.assertIn(f'id=\"{anchor}\"', html)
+            self.assertIn(f'href=\"#{anchor}\"', html)
 
 
 if __name__ == "__main__":

@@ -28,6 +28,20 @@ def create_app(config_overrides: dict[str, Any] | None = None) -> Flask:
     if not secret_key:
         secret_key = secrets.token_hex(32)
     app.config["SECRET_KEY"] = secret_key
+    app.config["APP_NAME"] = os.environ.get("SP_APP_NAME", "BioEvidence")
+    app.config["APP_TAGLINE"] = os.environ.get(
+        "SP_APP_TAGLINE",
+        "Teach and trace SNV outcomes.",
+    )
+    if "SP_APP_SHORT_NAME" in os.environ:
+        app.config["APP_SHORT_NAME"] = os.environ.get("SP_APP_SHORT_NAME")
+    else:
+        name_parts = [part for part in app.config["APP_NAME"].split() if part]
+        if len(name_parts) > 1:
+            short_name = "".join(part[0] for part in name_parts[:2]).upper()
+        else:
+            short_name = app.config["APP_NAME"][:2].upper()
+        app.config["APP_SHORT_NAME"] = short_name
 
     default_db_path = os.path.join(project_root, "instance", "sp.db")
     app.config["SP_DB_PATH"] = os.environ.get("SP_DB_PATH", default_db_path)
@@ -105,9 +119,21 @@ def create_app(config_overrides: dict[str, Any] | None = None) -> Flask:
             413,
         )
 
+    @app.context_processor
+    def inject_app_branding():
+        return {
+            "app_name": app.config.get("APP_NAME", "BioEvidence"),
+            "app_tagline": app.config.get("APP_TAGLINE", "Teach and trace SNV outcomes."),
+            "app_short_name": app.config.get("APP_SHORT_NAME", "BE"),
+        }
+
     @app.get("/")
     def index():
         return render_template("index.html")
+
+    @app.get("/docs")
+    def docs():
+        return render_template("docs.html")
 
     def _serialize_run_for_response(
         run: dict | None,

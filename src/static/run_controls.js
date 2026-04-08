@@ -183,6 +183,12 @@
     return String(value).trim().toLowerCase().replace(/_/g, " ");
   }
 
+  function statusTooltipKey(status) {
+    const normalized = normalizeStatusKey(status);
+    if (!normalized) return "";
+    return `status.${normalized.replace(/\s+/g, "_")}`;
+  }
+
   function statusLabel(status) {
     const normalized = normalizeStatusKey(status);
     if (!normalized) return "";
@@ -196,11 +202,14 @@
   }
 
   function buildStatusIndicator(status, labelText) {
-    const indicator = document.createElement("span");
+    const indicator = document.createElement("button");
     indicator.className = "status-indicator";
+    indicator.type = "button";
     const normalized = normalizeStatusKey(status);
     if (normalized) {
       indicator.dataset.status = normalized.replace(/\s+/g, "-");
+      const tooltipKey = statusTooltipKey(normalized);
+      if (tooltipKey) indicator.dataset.tooltipKey = tooltipKey;
     }
 
     const icon = statusIcon(status);
@@ -225,6 +234,7 @@
     if (!container) return;
     clearEl(container);
     container.appendChild(buildStatusIndicator(status, labelText));
+    window.SPTooltips?.applyGlossary?.(container);
   }
 
   function formatStatus(status) {
@@ -447,9 +457,20 @@
     body.className = "ms-2 me-auto";
 
     const title = document.createElement("div");
-    title.className = "fw-semibold";
+    title.className = "fw-semibold d-inline-flex align-items-center gap-1";
     title.dataset.role = "stage-title";
+    const titleText = document.createElement("span");
+    titleText.dataset.role = "stage-title-text";
+    title.appendChild(titleText);
     body.appendChild(title);
+
+    const titleHelp = document.createElement("button");
+    titleHelp.type = "button";
+    titleHelp.className = "info-chip";
+    titleHelp.dataset.tooltipKey = `stage.${stageName}`;
+    titleHelp.setAttribute("aria-label", `Help: ${humanizeStageName(stageName)}`);
+    titleHelp.textContent = "?";
+    title.appendChild(titleHelp);
 
     const detail = document.createElement("div");
     detail.className = "small text-danger";
@@ -607,25 +628,43 @@
       } else {
         text = "SnpEff completed.";
       }
-    } else if (normalizedName === "reporting" && modeSnippet) {
-      text = modeSnippet;
     } else if (note) {
       text = String(note);
     }
 
-    if (modeSnippet && normalizedName === "annotation") {
-      text = text ? `${text} ${modeSnippet}` : modeSnippet;
-    }
-
-    if (!text) {
+    if (!text && !modeSnippet) {
       statsEl.style.display = "none";
+      statsEl.removeAttribute("data-tooltip-key");
       return;
     }
 
-    const span = document.createElement("span");
-    span.textContent = text;
-    statsEl.appendChild(span);
+    if (text) {
+      const span = document.createElement("span");
+      span.textContent = text;
+      statsEl.appendChild(span);
+    }
+    if (modeSnippet) {
+      if (text) statsEl.appendChild(document.createTextNode(" "));
+      const modeLine = document.createElement("span");
+      modeLine.className = "d-inline-flex align-items-center gap-1 flex-wrap";
+      const modeLabel = document.createElement("span");
+      modeLabel.textContent = "Evidence mode";
+      const modeHelp = document.createElement("button");
+      modeHelp.type = "button";
+      modeHelp.className = "info-chip";
+      modeHelp.dataset.tooltipKey = "term.evidence_mode";
+      modeHelp.setAttribute("aria-label", "Help: evidence mode");
+      modeHelp.textContent = "?";
+      const modeDetails = document.createElement("span");
+      modeDetails.textContent = `requested=${formatEvidenceMode(requestedMode)} effective=${formatEvidenceMode(effectiveMode)}`;
+      modeLine.appendChild(modeLabel);
+      modeLine.appendChild(modeHelp);
+      modeLine.appendChild(document.createTextNode(": "));
+      modeLine.appendChild(modeDetails);
+      statsEl.appendChild(modeLine);
+    }
     statsEl.style.display = "";
+    statsEl.removeAttribute("data-tooltip-key");
   }
 
   function updateElapsedForRow(li) {
@@ -753,7 +792,7 @@
       const li = ensureStageRow(stageName);
       stagesEl.appendChild(li);
 
-      const titleEl = li.querySelector('[data-role="stage-title"]');
+      const titleEl = li.querySelector('[data-role="stage-title-text"]');
       if (titleEl) titleEl.textContent = humanizeStageName(stageName);
 
       const error = stage?.error ?? null;
@@ -819,6 +858,8 @@
       closeEventSource();
       setLiveUpdates("success", "Live updates: completed.");
     }
+
+    window.SPTooltips?.applyGlossary?.(stagesEl);
   }
 
   function setLiveUpdates(kind, text) {
@@ -1224,7 +1265,8 @@
 
   try {
     const stored = JSON.parse(localStorage.getItem(STORAGE_KEY));
-    if (stored?.run_id) {
+    const shouldRestore = stored?.run_id;
+    if (shouldRestore) {
       setRun(stored);
       void refreshFromServer(stored.run_id);
       void refreshStagesFromServer(stored.run_id);

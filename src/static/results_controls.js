@@ -329,6 +329,12 @@
     return String(value).trim().toLowerCase().replace(/_/g, " ");
   }
 
+  function statusTooltipKey(status) {
+    const normalized = normalizeStatusKey(status);
+    if (!normalized) return "";
+    return `status.${normalized.replace(/\s+/g, "_")}`;
+  }
+
   function statusLabel(status) {
     const normalized = normalizeStatusKey(status);
     if (!normalized) return "";
@@ -342,11 +348,14 @@
   }
 
   function buildStatusIndicator(status, labelText) {
-    const indicator = document.createElement("span");
+    const indicator = document.createElement("button");
     indicator.className = "status-indicator";
+    indicator.type = "button";
     const normalized = normalizeStatusKey(status);
     if (normalized) {
       indicator.dataset.status = normalized.replace(/\s+/g, "-");
+      const tooltipKey = statusTooltipKey(normalized);
+      if (tooltipKey) indicator.dataset.tooltipKey = tooltipKey;
     }
 
     const icon = statusIcon(status);
@@ -372,6 +381,11 @@
     if (!container) return;
     clearEl(container);
     container.appendChild(buildStatusIndicator(status, labelText));
+    window.SPTooltips?.applyGlossary?.(container);
+  }
+
+  function refreshTooltips(scope) {
+    window.SPTooltips?.applyGlossary?.(scope || document);
   }
 
   function isInteractiveElement(target) {
@@ -826,13 +840,17 @@
     });
   }
 
-  function loadRunId() {
+  function loadStoredRun() {
     try {
-      const stored = JSON.parse(localStorage.getItem(STORAGE_KEY));
-      return stored?.run_id ?? null;
+      return JSON.parse(localStorage.getItem(STORAGE_KEY));
     } catch {
       return null;
     }
+  }
+
+  function loadRunId() {
+    const stored = loadStoredRun();
+    return stored?.run_id ?? null;
   }
 
   function stageStatusText(stageStatus, pendingText) {
@@ -2904,7 +2922,13 @@
 
   window.addEventListener("sp:run-changed", (evt) => {
     pausePolling = false;
-    const nextRunId = evt?.detail?.run?.run_id ?? loadRunId();
+    const nextRunId = evt?.detail?.run?.run_id ?? null;
+    if (!nextRunId) {
+      lastRunId = null;
+      resetToNoRun();
+      scheduleNextRefresh(1800);
+      return;
+    }
     const runChanged = nextRunId !== lastRunId;
     if (runChanged) {
       htmlArtifactsReady = false;
@@ -3601,6 +3625,7 @@
       await refreshAnnotationEvidence(runId, annotationStage);
       await refreshArtifacts(runId);
       renderReporting(reportingStage);
+      refreshTooltips();
 
       if (isTerminalPipelineSnapshot(stages) && htmlArtifactsReady) {
         pausePolling = true;

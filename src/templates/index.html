@@ -35,6 +35,14 @@
                 />
                 <label class="form-check-label" for="annotation-evidence-policy-stop">
                   Stop run when an evidence source fails
+                  <button
+                    type="button"
+                    class="info-chip"
+                    data-tooltip-key="evidence_policy.stop"
+                    aria-label="Help: stop evidence policy"
+                  >
+                    ?
+                  </button>
                 </label>
               </div>
               <div class="form-check">
@@ -48,6 +56,14 @@
                 />
                 <label class="form-check-label" for="annotation-evidence-policy-continue">
                   Continue with missing evidence (flag as partial)
+                  <button
+                    type="button"
+                    class="info-chip"
+                    data-tooltip-key="evidence_policy.continue"
+                    aria-label="Help: continue evidence policy"
+                  >
+                    ?
+                  </button>
                 </label>
               </div>
               <div id="annotation-evidence-policy-help" class="form-text">
@@ -66,17 +82,29 @@
           </form>
 
           <div id="upload-validation-message" class="mt-3" role="status" aria-live="polite"></div>
-          <div id="upload-validation-results" class="mt-2"></div>
+          <div
+            id="upload-validation-results"
+            class="mt-2"
+            role="status"
+            aria-live="polite"
+            aria-label="Validation details"
+          ></div>
         </div>
       </section>
     </div>
 
     <div class="col-12">
-      <section id="workspace-section" class="card shadow-sm">
+      <section id="workspace-section" class="card shadow-sm border-0">
         <div class="card-body">
           <h2 class="h5 mb-3">Workspace</h2>
 
-          <ul class="nav nav-tabs" id="workspace-tabs" role="tablist">
+          <ul
+            class="nav nav-tabs"
+            id="workspace-tabs"
+            role="tablist"
+            aria-label="Workspace tabs"
+            aria-describedby="workspace-tab-help"
+          >
             <li class="nav-item" role="presentation">
               <button
                 class="nav-link active"
@@ -106,6 +134,9 @@
               </button>
             </li>
           </ul>
+          <div id="workspace-tab-help" class="small text-secondary mt-2">
+            Progress tracks stage status and logs. Results shows stage outputs and summaries.
+          </div>
 
           <div class="tab-content pt-3" id="workspace-tab-content">
             <div
@@ -115,43 +146,108 @@
               aria-labelledby="progress-tab"
               tabindex="0"
             >
-              <div class="d-flex flex-wrap align-items-center gap-2 mb-3">
-                <button
-                  id="retry-failed-stage-btn"
-                  class="btn btn-sm btn-outline-warning"
-                  type="button"
-                  disabled
-                  hidden
-                >
-                  Retry from failed stage
-                </button>
-                <button
-                  id="cancel-run-btn"
-                  class="btn btn-sm btn-outline-danger"
-                  type="button"
-                  disabled
-                  hidden
-                >
-                  Cancel run
-                </button>
+              <div class="workspace-block">
+                <div class="d-flex flex-wrap align-items-center gap-2">
+                  <button
+                    id="retry-failed-stage-btn"
+                    class="btn btn-sm btn-outline-warning"
+                    type="button"
+                    disabled
+                    hidden
+                  >
+                    Retry from failed stage
+                  </button>
+                  <button
+                    id="cancel-run-btn"
+                    class="btn btn-sm btn-outline-danger"
+                    type="button"
+                    disabled
+                    hidden
+                  >
+                    Cancel run
+                  </button>
+                </div>
               </div>
 
-              <dl class="row gy-1 mb-0 small">
-                <dt class="col-3 text-secondary">Run ID</dt>
-                <dd class="col-9 mb-0"><code id="current-run-id">&mdash;</code></dd>
+              <div class="workspace-block">
+                <h3 class="workspace-block-title" id="run-summary-heading">
+                  Run summary
+                  <button
+                    type="button"
+                    class="info-chip"
+                    data-tooltip-key="section.run_summary"
+                    aria-label="Help: run summary"
+                  >
+                    ?
+                  </button>
+                </h3>
+                <dl class="row gy-2 mb-0 small" aria-labelledby="run-summary-heading">
+                  <dt class="col-3 text-secondary">
+                    <span class="d-inline-flex align-items-center">
+                      Run ID
+                      <button
+                        type="button"
+                        class="info-chip"
+                        data-tooltip-key="term.run_id"
+                        aria-label="Help: run ID"
+                      >
+                        ?
+                      </button>
+                    </span>
+                  </dt>
+                  <dd class="col-9 mb-0"><code id="current-run-id">&mdash;</code></dd>
 
-                <dt class="col-3 text-secondary">Status</dt>
-                <dd class="col-9 mb-0">
-                  <span id="current-run-status" class="text-secondary">No run</span>
-                </dd>
+                  <dt class="col-3 text-secondary">
+                    <span class="d-inline-flex align-items-center">
+                      Status
+                      <button
+                        type="button"
+                        class="info-chip"
+                        data-tooltip-key="term.run_status"
+                        aria-label="Help: run status"
+                      >
+                        ?
+                      </button>
+                    </span>
+                  </dt>
+                  <dd class="col-9 mb-0">
+                    <span id="current-run-status" class="text-secondary">No run</span>
+                  </dd>
 
-                <dt class="col-3 text-secondary">Reference build</dt>
-                <dd class="col-9 mb-0"><code id="current-run-reference-build">&mdash;</code></dd>
-              </dl>
+                  <dt class="col-3 text-secondary">
+                    <span class="d-inline-flex align-items-center">
+                      Reference build
+                      <button
+                        type="button"
+                        class="info-chip"
+                        data-tooltip-key="term.reference_build"
+                        aria-label="Help: reference build"
+                      >
+                        ?
+                      </button>
+                    </span>
+                  </dt>
+                  <dd class="col-9 mb-0"><code id="current-run-reference-build">&mdash;</code></dd>
+                </dl>
+              </div>
 
-              <div class="mt-4">
-                <h3 class="h6 mb-2">Stages</h3>
-                <ol id="current-run-stages" class="list-group list-group-numbered small"></ol>
+              <div class="workspace-block">
+                <h3 class="workspace-block-title" id="current-run-stages-heading">
+                  Stages
+                  <button
+                    type="button"
+                    class="info-chip"
+                    data-tooltip-key="section.pipeline_stages"
+                    aria-label="Help: pipeline stages"
+                  >
+                    ?
+                  </button>
+                </h3>
+                <ol
+                  id="current-run-stages"
+                  class="list-group list-group-numbered small"
+                  aria-labelledby="current-run-stages-heading"
+                ></ol>
                 <div
                   id="current-run-stages-message"
                   class="small text-secondary mt-2"
@@ -160,9 +256,19 @@
                 ></div>
               </div>
 
-              <div class="mt-4">
+              <div class="workspace-block">
                 <div class="d-flex align-items-baseline justify-content-between gap-2">
-                  <h3 class="h6 mb-2">Run logs</h3>
+                  <h3 class="workspace-block-title mb-0">
+                    Run logs
+                    <button
+                      type="button"
+                      class="info-chip"
+                      data-tooltip-key="section.run_logs"
+                      aria-label="Help: run logs"
+                    >
+                      ?
+                    </button>
+                  </h3>
                   <span class="small text-secondary">Latest entries</span>
                 </div>
                 <div
@@ -184,12 +290,23 @@
                 </div>
               </div>
 
-              <div class="mt-3 small" role="status" aria-live="polite">
-                <span class="text-secondary">Live updates:</span>
-                <span id="live-updates-indicator" class="ms-1 text-secondary">Not connected.</span>
+              <div class="workspace-block">
+                <div class="small" role="status" aria-live="polite">
+                  <span class="text-secondary">
+                    Live updates:
+                    <button
+                      type="button"
+                      class="info-chip"
+                      data-tooltip-key="term.live_updates"
+                      aria-label="Help: live updates"
+                    >
+                      ?
+                    </button>
+                  </span>
+                  <span id="live-updates-indicator" class="ms-1 text-secondary">Not connected.</span>
+                </div>
+                <div id="run-status-message" class="mt-2" role="status" aria-live="polite"></div>
               </div>
-
-              <div id="run-status-message" class="mt-3" role="status" aria-live="polite"></div>
             </div>
 
             <div
@@ -199,16 +316,29 @@
               aria-labelledby="results-tab"
               tabindex="0"
             >
-              <div class="alert alert-secondary small mb-3" role="status">
-                Partial results can appear while the pipeline is running. Final results are available after the Reporting stage succeeds.
+              <div class="workspace-block">
+                <div class="alert alert-secondary small mb-0" role="status">
+                  Partial results can appear while the pipeline is running. Final results are available after the Reporting stage succeeds.
+                </div>
               </div>
 
-              <div class="d-flex align-items-baseline justify-content-between gap-2 mb-3">
-                <h3 class="h6 mb-0">Stage results</h3>
-                <span class="small text-secondary">Select a stage tab to view detailed outputs.</span>
-              </div>
+              <div class="workspace-block">
+                <div class="d-flex align-items-baseline justify-content-between gap-2 mb-3">
+                  <h3 class="workspace-block-title mb-0">
+                    Stage results
+                    <button
+                      type="button"
+                      class="info-chip"
+                      data-tooltip-key="section.stage_results"
+                      aria-label="Help: stage results"
+                    >
+                      ?
+                    </button>
+                  </h3>
+                  <span class="small text-secondary">Select a stage tab to view detailed outputs.</span>
+                </div>
 
-              <ul class="nav nav-tabs mb-3" id="results-stage-tabs" role="tablist">
+                <ul class="nav nav-tabs mb-3" id="results-stage-tabs" role="tablist" aria-label="Results stage tabs">
                 <li class="nav-item" role="presentation">
                   <button
                     class="nav-link active"
@@ -217,8 +347,9 @@
                     data-bs-target="#results-stage-reporting-pane"
                     type="button"
                     role="tab"
-                  aria-controls="results-stage-reporting-pane"
-                  aria-selected="true"
+                    aria-controls="results-stage-reporting-pane"
+                    aria-selected="true"
+                    data-tooltip-key="stage.reporting"
                 >
                     Reports
                   </button>
@@ -233,6 +364,7 @@
                     role="tab"
                     aria-controls="results-stage-parser-pane"
                     aria-selected="false"
+                    data-tooltip-key="stage.parser"
                   >
                     Parser
                   </button>
@@ -247,6 +379,7 @@
                     role="tab"
                     aria-controls="results-stage-pre-annotation-pane"
                     aria-selected="false"
+                    data-tooltip-key="stage.pre_annotation"
                   >
                     Pre-annotation
                   </button>
@@ -261,6 +394,7 @@
                     role="tab"
                     aria-controls="results-stage-classification-pane"
                     aria-selected="false"
+                    data-tooltip-key="stage.classification"
                   >
                     Consequence
                   </button>
@@ -275,6 +409,7 @@
                     role="tab"
                     aria-controls="results-stage-prediction-pane"
                     aria-selected="false"
+                    data-tooltip-key="stage.prediction"
                   >
                     Functional prediction
                   </button>
@@ -289,6 +424,7 @@
                     role="tab"
                     aria-controls="results-stage-annotation-pane"
                     aria-selected="false"
+                    data-tooltip-key="stage.annotation"
                   >
                     Evidence annotation
                   </button>
@@ -322,7 +458,17 @@
                         Start a run to view partial and final results.
                       </div>
                       <div class="mt-3">
-                        <div class="small fw-semibold mb-1">Reports Summary</div>
+                        <h4 class="small fw-semibold mb-1" id="reporting-summary-heading">
+                          Reports Summary
+                          <button
+                            type="button"
+                            class="info-chip"
+                            data-tooltip-key="artifact.reports_summary"
+                            aria-label="Help: reports summary"
+                          >
+                            ?
+                          </button>
+                        </h4>
                         <div id="reporting-summary-note" class="small text-secondary mb-2" role="note">
                           The reporting stage synthesizes stage outputs and evidence diagnostics into concise highlights.
                         </div>
@@ -338,14 +484,24 @@
                           aria-label="Reports summary"
                           tabindex="0"
                         ></div>
-                        <div class="small fw-semibold mb-1 mt-3">Significant results</div>
+                        <h4 class="small fw-semibold mb-1 mt-3" id="reporting-significant-heading">Significant results</h4>
                         <div
                           id="reporting-significant-results"
                           class="small mt-2 results-scroll-box results-scroll-summary"
                           aria-label="Reports significant results"
                           tabindex="0"
                         ></div>
-                        <div class="small fw-semibold mb-1 mt-3">Evidence diagnostics (summary)</div>
+                        <h4 class="small fw-semibold mb-1 mt-3" id="reporting-evidence-heading">
+                          Evidence diagnostics (summary)
+                          <button
+                            type="button"
+                            class="info-chip"
+                            data-tooltip-key="section.evidence_diagnostics"
+                            aria-label="Help: evidence diagnostics"
+                          >
+                            ?
+                          </button>
+                        </h4>
                         <div
                           id="reporting-evidence-diagnostics"
                           class="small mt-2 results-scroll-box results-scroll-summary"
@@ -354,9 +510,29 @@
                         ></div>
                       </div>
                       <div class="mt-3">
-                        <div class="small fw-semibold mb-1">Variant Summary</div>
+                        <h4 class="small fw-semibold mb-1" id="variant-summary-heading">
+                          Variant Summary
+                          <button
+                            type="button"
+                            class="info-chip"
+                            data-tooltip-key="section.variant_summary"
+                            aria-label="Help: variant summary"
+                          >
+                            ?
+                          </button>
+                        </h4>
                         <div class="d-flex flex-wrap align-items-center gap-2 small mb-2">
-                          <label for="variant-summary-completeness-filter" class="text-secondary">Completion:</label>
+                          <label for="variant-summary-completeness-filter" class="text-secondary">
+                            Completion:
+                            <button
+                              type="button"
+                              class="info-chip"
+                              data-tooltip-key="term.completeness_filter"
+                              aria-label="Help: completion filter"
+                            >
+                              ?
+                            </button>
+                          </label>
                           <select id="variant-summary-completeness-filter" class="form-select form-select-sm w-auto">
                             <option value="">All statuses</option>
                             <option value="complete">Complete</option>
@@ -378,6 +554,7 @@
                               class="table table-sm table-striped table-hover align-middle mb-0"
                               hidden
                             >
+                              <caption class="visually-hidden">Variant summary table</caption>
                               <thead class="table-light">
                                 <tr>
                                   <th scope="col">Variant</th>
@@ -388,7 +565,19 @@
                                   <th scope="col">Classification</th>
                                   <th scope="col">Prediction</th>
                                   <th scope="col">Evidence</th>
-                                  <th scope="col">Completeness</th>
+                                  <th scope="col">
+                                    <span class="d-inline-flex align-items-center">
+                                      Completeness
+                                      <button
+                                        type="button"
+                                        class="info-chip"
+                                        data-tooltip-key="term.completeness"
+                                        aria-label="Help: completeness"
+                                      >
+                                        ?
+                                      </button>
+                                    </span>
+                                  </th>
                                 </tr>
                               </thead>
                               <tbody id="variant-summary-body"></tbody>
@@ -400,6 +589,8 @@
                             id="variant-summary-page-prev"
                             class="btn btn-sm btn-outline-secondary"
                             type="button"
+                            aria-label="Previous variant summary page"
+                            aria-controls="variant-summary-table"
                           >
                             Prev
                           </button>
@@ -407,6 +598,8 @@
                             id="variant-summary-page-next"
                             class="btn btn-sm btn-outline-secondary"
                             type="button"
+                            aria-label="Next variant summary page"
+                            aria-controls="variant-summary-table"
                           >
                             Next
                           </button>
@@ -415,7 +608,7 @@
                       </div>
                       <div class="mt-4">
                         <div class="d-flex align-items-baseline justify-content-between gap-2">
-                          <h3 class="h6 mb-2">HTML artifacts</h3>
+                          <h3 class="h6 mb-2" id="html-artifacts-heading">HTML artifacts</h3>
                           <span class="badge text-bg-light border">Produced by stage: <code>reporting</code></span>
                         </div>
                         <div class="small text-secondary mb-2">
@@ -427,7 +620,7 @@
                           role="status"
                           aria-live="polite"
                         ></div>
-                        <div id="final-html-artifacts" class="mt-2"></div>
+                        <div id="final-html-artifacts" class="mt-2" aria-labelledby="html-artifacts-heading"></div>
                       </div>
                     </div>
                   </div>
@@ -492,6 +685,7 @@
                             class="table table-sm table-striped table-hover align-middle mb-0"
                             hidden
                           >
+                            <caption class="visually-hidden">Pre-annotation results table</caption>
                             <thead class="table-light">
                               <tr>
                                 <th scope="col">Variant</th>
@@ -510,6 +704,8 @@
                           id="pre-annotation-page-prev"
                           class="btn btn-sm btn-outline-secondary"
                           type="button"
+                          aria-label="Previous pre-annotation results page"
+                          aria-controls="pre-annotation-results-table"
                         >
                           Prev
                         </button>
@@ -517,6 +713,8 @@
                           id="pre-annotation-page-next"
                           class="btn btn-sm btn-outline-secondary"
                           type="button"
+                          aria-label="Next pre-annotation results page"
+                          aria-controls="pre-annotation-results-table"
                         >
                           Next
                         </button>
@@ -568,6 +766,7 @@
                             class="table table-sm table-striped table-hover align-middle mb-0"
                             hidden
                           >
+                            <caption class="visually-hidden">Classification results table</caption>
                             <thead class="table-light">
                               <tr>
                                 <th scope="col">Variant</th>
@@ -584,6 +783,8 @@
                           id="classification-page-prev"
                           class="btn btn-sm btn-outline-secondary"
                           type="button"
+                          aria-label="Previous classification results page"
+                          aria-controls="classification-results-table"
                         >
                           Prev
                         </button>
@@ -591,13 +792,15 @@
                           id="classification-page-next"
                           class="btn btn-sm btn-outline-secondary"
                           type="button"
+                          aria-label="Next classification results page"
+                          aria-controls="classification-results-table"
                         >
                           Next
                         </button>
                         <span id="classification-page-label" class="text-secondary"></span>
                       </div>
                       <div class="mt-4">
-                        <div class="small fw-semibold mb-1">Classification artifacts (full)</div>
+                        <h4 class="small fw-semibold mb-1" id="classification-artifacts-heading">Classification artifacts (full)</h4>
                         <div
                           id="classification-artifacts-message"
                           class="small text-secondary"
@@ -606,7 +809,17 @@
                         ></div>
 
                         <div class="mt-3">
-                          <div class="small fw-semibold mb-1">Input VCF</div>
+                          <h5 class="small fw-semibold mb-1" id="classification-input-vcf-heading">
+                            Input VCF
+                            <button
+                              type="button"
+                              class="info-chip"
+                              data-tooltip-key="artifact.classification_input_vcf"
+                              aria-label="Help: classification input VCF"
+                            >
+                              ?
+                            </button>
+                          </h5>
                           <div class="d-flex flex-wrap align-items-center gap-2 small mb-2">
                             <label for="classification-input-vcf-pos" class="text-secondary">Position:</label>
                             <input
@@ -620,6 +833,8 @@
                               id="classification-input-vcf-search"
                               class="btn btn-sm btn-outline-secondary"
                               type="button"
+                              aria-label="Search classification input VCF by position"
+                              aria-controls="classification-input-vcf-table"
                             >
                               Search
                             </button>
@@ -627,6 +842,8 @@
                               id="classification-input-vcf-clear"
                               class="btn btn-sm btn-link px-1"
                               type="button"
+                              aria-label="Clear classification input VCF position filter"
+                              aria-controls="classification-input-vcf-table"
                             >
                               Clear
                             </button>
@@ -644,6 +861,7 @@
                                 class="table table-sm table-striped table-hover align-middle mb-0"
                                 hidden
                               >
+                                <caption class="visually-hidden">Classification input VCF preview table</caption>
                                 <thead class="table-light">
                                   <tr id="classification-input-vcf-head-row"></tr>
                                 </thead>
@@ -656,6 +874,8 @@
                               id="classification-input-vcf-page-prev"
                               class="btn btn-sm btn-outline-secondary"
                               type="button"
+                              aria-label="Previous classification input VCF page"
+                              aria-controls="classification-input-vcf-table"
                             >
                               Prev
                             </button>
@@ -663,6 +883,8 @@
                               id="classification-input-vcf-page-next"
                               class="btn btn-sm btn-outline-secondary"
                               type="button"
+                              aria-label="Next classification input VCF page"
+                              aria-controls="classification-input-vcf-table"
                             >
                               Next
                             </button>
@@ -714,6 +936,7 @@
                             class="table table-sm table-striped table-hover align-middle mb-0"
                             hidden
                           >
+                            <caption class="visually-hidden">Prediction results table</caption>
                             <thead class="table-light">
                               <tr>
                                 <th scope="col">Variant</th>
@@ -732,6 +955,8 @@
                           id="prediction-page-prev"
                           class="btn btn-sm btn-outline-secondary"
                           type="button"
+                          aria-label="Previous prediction results page"
+                          aria-controls="prediction-results-table"
                         >
                           Prev
                         </button>
@@ -739,13 +964,15 @@
                           id="prediction-page-next"
                           class="btn btn-sm btn-outline-secondary"
                           type="button"
+                          aria-label="Next prediction results page"
+                          aria-controls="prediction-results-table"
                         >
                           Next
                         </button>
                         <span id="prediction-page-label" class="text-secondary"></span>
                       </div>
                       <div class="mt-4">
-                        <div class="small fw-semibold mb-1">Prediction artifacts (full)</div>
+                        <h4 class="small fw-semibold mb-1" id="prediction-artifacts-heading">Prediction artifacts (full)</h4>
                         <div
                           id="prediction-artifacts-message"
                           class="small text-secondary"
@@ -754,7 +981,17 @@
                         ></div>
 
                         <div class="mt-3">
-                          <div class="small fw-semibold mb-1">Input VCF</div>
+                          <h5 class="small fw-semibold mb-1" id="prediction-input-vcf-heading">
+                            Input VCF
+                            <button
+                              type="button"
+                              class="info-chip"
+                              data-tooltip-key="artifact.prediction_input_vcf"
+                              aria-label="Help: prediction input VCF"
+                            >
+                              ?
+                            </button>
+                          </h5>
                           <div class="d-flex flex-wrap align-items-center gap-2 small mb-2">
                             <label for="prediction-input-vcf-pos" class="text-secondary">Position:</label>
                             <input
@@ -768,6 +1005,8 @@
                               id="prediction-input-vcf-search"
                               class="btn btn-sm btn-outline-secondary"
                               type="button"
+                              aria-label="Search prediction input VCF by position"
+                              aria-controls="prediction-input-vcf-table"
                             >
                               Search
                             </button>
@@ -775,6 +1014,8 @@
                               id="prediction-input-vcf-clear"
                               class="btn btn-sm btn-link px-1"
                               type="button"
+                              aria-label="Clear prediction input VCF position filter"
+                              aria-controls="prediction-input-vcf-table"
                             >
                               Clear
                             </button>
@@ -792,6 +1033,7 @@
                                 class="table table-sm table-striped table-hover align-middle mb-0"
                                 hidden
                               >
+                                <caption class="visually-hidden">Prediction input VCF preview table</caption>
                                 <thead class="table-light">
                                   <tr id="prediction-input-vcf-head-row"></tr>
                                 </thead>
@@ -804,6 +1046,8 @@
                               id="prediction-input-vcf-page-prev"
                               class="btn btn-sm btn-outline-secondary"
                               type="button"
+                              aria-label="Previous prediction input VCF page"
+                              aria-controls="prediction-input-vcf-table"
                             >
                               Prev
                             </button>
@@ -811,6 +1055,8 @@
                               id="prediction-input-vcf-page-next"
                               class="btn btn-sm btn-outline-secondary"
                               type="button"
+                              aria-label="Next prediction input VCF page"
+                              aria-controls="prediction-input-vcf-table"
                             >
                               Next
                             </button>
@@ -854,7 +1100,17 @@
                         tabindex="0"
                       ></div>
                       <div class="mt-3">
-                        <div class="small fw-semibold mb-1">Evidence Diagnostics</div>
+                        <h4 class="small fw-semibold mb-1" id="annotation-diagnostics-heading">
+                          Evidence Diagnostics
+                          <button
+                            type="button"
+                            class="info-chip"
+                            data-tooltip-key="section.evidence_diagnostics"
+                            aria-label="Help: evidence diagnostics"
+                          >
+                            ?
+                          </button>
+                        </h4>
                         <div
                           id="annotation-diagnostics-message"
                           class="small text-secondary"
@@ -868,12 +1124,37 @@
                               class="table table-sm table-striped table-hover align-middle mb-0"
                               hidden
                             >
+                              <caption class="visually-hidden">Annotation diagnostics table</caption>
                               <thead class="table-light">
                                 <tr>
-                                  <th scope="col">Source</th>
+                                  <th scope="col">
+                                    <span class="d-inline-flex align-items-center">
+                                      Source
+                                      <button
+                                        type="button"
+                                        class="info-chip"
+                                        data-tooltip-key="term.evidence_source"
+                                        aria-label="Help: evidence source"
+                                      >
+                                        ?
+                                      </button>
+                                    </span>
+                                  </th>
                                   <th scope="col">Enabled</th>
                                   <th scope="col">Outcome</th>
-                                  <th scope="col">Completeness impact</th>
+                                  <th scope="col">
+                                    <span class="d-inline-flex align-items-center">
+                                      Completeness impact
+                                      <button
+                                        type="button"
+                                        class="info-chip"
+                                        data-tooltip-key="term.completeness"
+                                        aria-label="Help: completeness impact"
+                                      >
+                                        ?
+                                      </button>
+                                    </span>
+                                  </th>
                                   <th scope="col">Errors</th>
                                   <th scope="col">Retry attempts</th>
                                   <th scope="col">Error sample</th>
@@ -888,7 +1169,7 @@
                         </div>
                       </div>
                       <div class="mt-3">
-                        <div class="small fw-semibold mb-1">Evidence Results</div>
+                        <h4 class="small fw-semibold mb-1" id="annotation-evidence-heading">Evidence Results</h4>
                         <div class="d-flex flex-wrap align-items-center gap-2 small mb-2">
                           <label for="annotation-evidence-classification-filter" class="text-secondary">Filter:</label>
                           <select
@@ -911,7 +1192,7 @@
                           <span class="text-secondary">Evidence is collected for missense variants only.</span>
                         </div>
                         <div class="mt-2">
-                          <div class="small fw-semibold mb-1">dbSNP</div>
+                          <h5 class="small fw-semibold mb-1" id="annotation-dbsnp-heading">dbSNP</h5>
                           <div
                             id="annotation-dbsnp-message"
                             class="small text-secondary"
@@ -925,13 +1206,26 @@
                                 class="table table-sm table-striped table-hover align-middle mb-0"
                                 hidden
                               >
+                                <caption class="visually-hidden">dbSNP evidence results table</caption>
                                 <thead class="table-light">
                                   <tr>
                                     <th scope="col">Variant</th>
                                     <th scope="col">Outcome</th>
                                     <th scope="col">rsID</th>
                                     <th scope="col">Reason</th>
-                                    <th scope="col">Retrieved</th>
+                                    <th scope="col">
+                                      <span class="d-inline-flex align-items-center">
+                                        Retrieved
+                                        <button
+                                          type="button"
+                                          class="info-chip"
+                                          data-tooltip-key="provenance.retrieved"
+                                          aria-label="Help: retrieved timestamp"
+                                        >
+                                          ?
+                                        </button>
+                                      </span>
+                                    </th>
                                   </tr>
                                 </thead>
                                 <tbody id="annotation-dbsnp-body"></tbody>
@@ -941,7 +1235,7 @@
                         </div>
 
                         <div class="mt-3">
-                          <div class="small fw-semibold mb-1">ClinVar</div>
+                          <h5 class="small fw-semibold mb-1" id="annotation-clinvar-heading">ClinVar</h5>
                           <div
                             id="annotation-clinvar-message"
                             class="small text-secondary"
@@ -955,6 +1249,7 @@
                                 class="table table-sm table-striped table-hover align-middle mb-0"
                                 hidden
                               >
+                                <caption class="visually-hidden">ClinVar evidence results table</caption>
                                 <thead class="table-light">
                                   <tr>
                                     <th scope="col">Variant</th>
@@ -962,7 +1257,19 @@
                                     <th scope="col">ClinVar ID</th>
                                     <th scope="col">Clinical significance</th>
                                     <th scope="col">Reason</th>
-                                    <th scope="col">Retrieved</th>
+                                    <th scope="col">
+                                      <span class="d-inline-flex align-items-center">
+                                        Retrieved
+                                        <button
+                                          type="button"
+                                          class="info-chip"
+                                          data-tooltip-key="provenance.retrieved"
+                                          aria-label="Help: retrieved timestamp"
+                                        >
+                                          ?
+                                        </button>
+                                      </span>
+                                    </th>
                                   </tr>
                                 </thead>
                                 <tbody id="annotation-clinvar-body"></tbody>
@@ -972,7 +1279,7 @@
                         </div>
 
                         <div class="mt-3">
-                          <div class="small fw-semibold mb-1">gnomAD</div>
+                          <h5 class="small fw-semibold mb-1" id="annotation-gnomad-heading">gnomAD</h5>
                           <div
                             id="annotation-gnomad-message"
                             class="small text-secondary"
@@ -986,6 +1293,7 @@
                                 class="table table-sm table-striped table-hover align-middle mb-0"
                                 hidden
                               >
+                                <caption class="visually-hidden">gnomAD evidence results table</caption>
                                 <thead class="table-light">
                                   <tr>
                                     <th scope="col">Variant</th>
@@ -993,7 +1301,19 @@
                                     <th scope="col">Variant ID</th>
                                     <th scope="col">Global AF</th>
                                     <th scope="col">Reason</th>
-                                    <th scope="col">Retrieved</th>
+                                    <th scope="col">
+                                      <span class="d-inline-flex align-items-center">
+                                        Retrieved
+                                        <button
+                                          type="button"
+                                          class="info-chip"
+                                          data-tooltip-key="provenance.retrieved"
+                                          aria-label="Help: retrieved timestamp"
+                                        >
+                                          ?
+                                        </button>
+                                      </span>
+                                    </th>
                                   </tr>
                                 </thead>
                                 <tbody id="annotation-gnomad-body"></tbody>
@@ -1003,7 +1323,17 @@
                         </div>
                       </div>
                       <div class="mt-3">
-                        <div class="small fw-semibold mb-1">Annotated VCF Output</div>
+                        <h4 class="small fw-semibold mb-1" id="annotation-vcf-heading">
+                          Annotated VCF Output
+                          <button
+                            type="button"
+                            class="info-chip"
+                            data-tooltip-key="artifact.snpeff_vcf"
+                            aria-label="Help: annotated VCF output"
+                          >
+                            ?
+                          </button>
+                        </h4>
                         <div class="d-flex flex-wrap align-items-center gap-2 small mb-2">
                           <label for="annotation-vcf-pos" class="text-secondary">Position:</label>
                           <input
@@ -1017,6 +1347,8 @@
                             id="annotation-vcf-search"
                             class="btn btn-sm btn-outline-secondary"
                             type="button"
+                            aria-label="Search annotated VCF by position"
+                            aria-controls="annotation-vcf-table"
                           >
                             Search
                           </button>
@@ -1024,6 +1356,8 @@
                             id="annotation-vcf-clear"
                             class="btn btn-sm btn-link px-1"
                             type="button"
+                            aria-label="Clear annotated VCF position filter"
+                            aria-controls="annotation-vcf-table"
                           >
                             Clear
                           </button>
@@ -1041,6 +1375,7 @@
                               class="table table-sm table-striped table-hover align-middle mb-0"
                               hidden
                             >
+                              <caption class="visually-hidden">Annotated VCF preview table</caption>
                               <thead class="table-light">
                                 <tr id="annotation-vcf-head-row"></tr>
                               </thead>
@@ -1053,6 +1388,8 @@
                               id="annotation-vcf-page-prev"
                               class="btn btn-sm btn-outline-secondary"
                               type="button"
+                              aria-label="Previous annotated VCF page"
+                              aria-controls="annotation-vcf-table"
                             >
                               Prev
                             </button>
@@ -1060,6 +1397,8 @@
                               id="annotation-vcf-page-next"
                               class="btn btn-sm btn-outline-secondary"
                               type="button"
+                              aria-label="Next annotated VCF page"
+                              aria-controls="annotation-vcf-table"
                             >
                               Next
                             </button>
@@ -1070,6 +1409,7 @@
                   </div>
                 </section>
                 </div>
+              </div>
               </div>
             </div>
           </div>
@@ -1222,9 +1562,33 @@
               <dd class="col-7 mb-2"><span id="variant-pred-sift-label">&mdash;</span></dd>
               <dt class="col-5 text-secondary">Reason</dt>
               <dd class="col-7 mb-2"><span id="variant-pred-sift-reason">&mdash;</span></dd>
-              <dt class="col-5 text-secondary">Retrieved</dt>
+              <dt class="col-5 text-secondary">
+                <span class="d-inline-flex align-items-center">
+                  Retrieved
+                  <button
+                    type="button"
+                    class="info-chip"
+                    data-tooltip-key="provenance.retrieved"
+                    aria-label="Help: retrieved timestamp"
+                  >
+                    ?
+                  </button>
+                </span>
+              </dt>
               <dd class="col-7 mb-2"><span id="variant-pred-sift-timestamp">&mdash;</span></dd>
-              <dt class="col-5 text-secondary">Source</dt>
+              <dt class="col-5 text-secondary">
+                <span class="d-inline-flex align-items-center">
+                  Source
+                  <button
+                    type="button"
+                    class="info-chip"
+                    data-tooltip-key="provenance.source"
+                    aria-label="Help: source"
+                  >
+                    ?
+                  </button>
+                </span>
+              </dt>
               <dd class="col-7 mb-0"><span id="variant-pred-sift-source">&mdash;</span></dd>
             </dl>
           </div>
@@ -1249,9 +1613,33 @@
               <dd class="col-7 mb-2"><span id="variant-pred-polyphen2-label">&mdash;</span></dd>
               <dt class="col-5 text-secondary">Reason</dt>
               <dd class="col-7 mb-2"><span id="variant-pred-polyphen2-reason">&mdash;</span></dd>
-              <dt class="col-5 text-secondary">Retrieved</dt>
+              <dt class="col-5 text-secondary">
+                <span class="d-inline-flex align-items-center">
+                  Retrieved
+                  <button
+                    type="button"
+                    class="info-chip"
+                    data-tooltip-key="provenance.retrieved"
+                    aria-label="Help: retrieved timestamp"
+                  >
+                    ?
+                  </button>
+                </span>
+              </dt>
               <dd class="col-7 mb-2"><span id="variant-pred-polyphen2-timestamp">&mdash;</span></dd>
-              <dt class="col-5 text-secondary">Source</dt>
+              <dt class="col-5 text-secondary">
+                <span class="d-inline-flex align-items-center">
+                  Source
+                  <button
+                    type="button"
+                    class="info-chip"
+                    data-tooltip-key="provenance.source"
+                    aria-label="Help: source"
+                  >
+                    ?
+                  </button>
+                </span>
+              </dt>
               <dd class="col-7 mb-0"><span id="variant-pred-polyphen2-source">&mdash;</span></dd>
             </dl>
           </div>
@@ -1276,9 +1664,33 @@
               <dd class="col-7 mb-2"><span id="variant-pred-alphamissense-label">&mdash;</span></dd>
               <dt class="col-5 text-secondary">Reason</dt>
               <dd class="col-7 mb-2"><span id="variant-pred-alphamissense-reason">&mdash;</span></dd>
-              <dt class="col-5 text-secondary">Retrieved</dt>
+              <dt class="col-5 text-secondary">
+                <span class="d-inline-flex align-items-center">
+                  Retrieved
+                  <button
+                    type="button"
+                    class="info-chip"
+                    data-tooltip-key="provenance.retrieved"
+                    aria-label="Help: retrieved timestamp"
+                  >
+                    ?
+                  </button>
+                </span>
+              </dt>
               <dd class="col-7 mb-2"><span id="variant-pred-alphamissense-timestamp">&mdash;</span></dd>
-              <dt class="col-5 text-secondary">Source</dt>
+              <dt class="col-5 text-secondary">
+                <span class="d-inline-flex align-items-center">
+                  Source
+                  <button
+                    type="button"
+                    class="info-chip"
+                    data-tooltip-key="provenance.source"
+                    aria-label="Help: source"
+                  >
+                    ?
+                  </button>
+                </span>
+              </dt>
               <dd class="col-7 mb-0"><span id="variant-pred-alphamissense-source">&mdash;</span></dd>
             </dl>
           </div>
@@ -1305,15 +1717,51 @@
             <dl class="row small mb-0">
               <dt class="col-5 text-secondary">Outcome</dt>
               <dd class="col-7 mb-2"><span id="variant-ev-dbsnp-outcome">&mdash;</span></dd>
-              <dt class="col-5 text-secondary">Completeness</dt>
+              <dt class="col-5 text-secondary">
+                <span class="d-inline-flex align-items-center">
+                  Completeness
+                  <button
+                    type="button"
+                    class="info-chip"
+                    data-tooltip-key="term.completeness"
+                    aria-label="Help: completeness"
+                  >
+                    ?
+                  </button>
+                </span>
+              </dt>
               <dd class="col-7 mb-2"><span id="variant-ev-dbsnp-completeness">&mdash;</span></dd>
               <dt class="col-5 text-secondary">rsID</dt>
               <dd class="col-7 mb-2"><span id="variant-ev-dbsnp-rsid">&mdash;</span></dd>
               <dt class="col-5 text-secondary">Reason</dt>
               <dd class="col-7 mb-2"><span id="variant-ev-dbsnp-reason">&mdash;</span></dd>
-              <dt class="col-5 text-secondary">Retrieved</dt>
+              <dt class="col-5 text-secondary">
+                <span class="d-inline-flex align-items-center">
+                  Retrieved
+                  <button
+                    type="button"
+                    class="info-chip"
+                    data-tooltip-key="provenance.retrieved"
+                    aria-label="Help: retrieved timestamp"
+                  >
+                    ?
+                  </button>
+                </span>
+              </dt>
               <dd class="col-7 mb-2"><span id="variant-ev-dbsnp-timestamp">&mdash;</span></dd>
-              <dt class="col-5 text-secondary">Source</dt>
+              <dt class="col-5 text-secondary">
+                <span class="d-inline-flex align-items-center">
+                  Source
+                  <button
+                    type="button"
+                    class="info-chip"
+                    data-tooltip-key="provenance.source"
+                    aria-label="Help: source"
+                  >
+                    ?
+                  </button>
+                </span>
+              </dt>
               <dd class="col-7 mb-0"><span id="variant-ev-dbsnp-source">&mdash;</span></dd>
             </dl>
           </div>
@@ -1332,7 +1780,19 @@
             <dl class="row small mb-0">
               <dt class="col-5 text-secondary">Outcome</dt>
               <dd class="col-7 mb-2"><span id="variant-ev-clinvar-outcome">&mdash;</span></dd>
-              <dt class="col-5 text-secondary">Completeness</dt>
+              <dt class="col-5 text-secondary">
+                <span class="d-inline-flex align-items-center">
+                  Completeness
+                  <button
+                    type="button"
+                    class="info-chip"
+                    data-tooltip-key="term.completeness"
+                    aria-label="Help: completeness"
+                  >
+                    ?
+                  </button>
+                </span>
+              </dt>
               <dd class="col-7 mb-2"><span id="variant-ev-clinvar-completeness">&mdash;</span></dd>
               <dt class="col-5 text-secondary">ClinVar ID</dt>
               <dd class="col-7 mb-2"><span id="variant-ev-clinvar-id">&mdash;</span></dd>
@@ -1340,9 +1800,33 @@
               <dd class="col-7 mb-2"><span id="variant-ev-clinvar-significance">&mdash;</span></dd>
               <dt class="col-5 text-secondary">Reason</dt>
               <dd class="col-7 mb-2"><span id="variant-ev-clinvar-reason">&mdash;</span></dd>
-              <dt class="col-5 text-secondary">Retrieved</dt>
+              <dt class="col-5 text-secondary">
+                <span class="d-inline-flex align-items-center">
+                  Retrieved
+                  <button
+                    type="button"
+                    class="info-chip"
+                    data-tooltip-key="provenance.retrieved"
+                    aria-label="Help: retrieved timestamp"
+                  >
+                    ?
+                  </button>
+                </span>
+              </dt>
               <dd class="col-7 mb-2"><span id="variant-ev-clinvar-timestamp">&mdash;</span></dd>
-              <dt class="col-5 text-secondary">Source</dt>
+              <dt class="col-5 text-secondary">
+                <span class="d-inline-flex align-items-center">
+                  Source
+                  <button
+                    type="button"
+                    class="info-chip"
+                    data-tooltip-key="provenance.source"
+                    aria-label="Help: source"
+                  >
+                    ?
+                  </button>
+                </span>
+              </dt>
               <dd class="col-7 mb-0"><span id="variant-ev-clinvar-source">&mdash;</span></dd>
             </dl>
           </div>
@@ -1361,7 +1845,19 @@
             <dl class="row small mb-0">
               <dt class="col-5 text-secondary">Outcome</dt>
               <dd class="col-7 mb-2"><span id="variant-ev-gnomad-outcome">&mdash;</span></dd>
-              <dt class="col-5 text-secondary">Completeness</dt>
+              <dt class="col-5 text-secondary">
+                <span class="d-inline-flex align-items-center">
+                  Completeness
+                  <button
+                    type="button"
+                    class="info-chip"
+                    data-tooltip-key="term.completeness"
+                    aria-label="Help: completeness"
+                  >
+                    ?
+                  </button>
+                </span>
+              </dt>
               <dd class="col-7 mb-2"><span id="variant-ev-gnomad-completeness">&mdash;</span></dd>
               <dt class="col-5 text-secondary">Variant ID</dt>
               <dd class="col-7 mb-2"><span id="variant-ev-gnomad-id">&mdash;</span></dd>
@@ -1369,9 +1865,33 @@
               <dd class="col-7 mb-2"><span id="variant-ev-gnomad-af">&mdash;</span></dd>
               <dt class="col-5 text-secondary">Reason</dt>
               <dd class="col-7 mb-2"><span id="variant-ev-gnomad-reason">&mdash;</span></dd>
-              <dt class="col-5 text-secondary">Retrieved</dt>
+              <dt class="col-5 text-secondary">
+                <span class="d-inline-flex align-items-center">
+                  Retrieved
+                  <button
+                    type="button"
+                    class="info-chip"
+                    data-tooltip-key="provenance.retrieved"
+                    aria-label="Help: retrieved timestamp"
+                  >
+                    ?
+                  </button>
+                </span>
+              </dt>
               <dd class="col-7 mb-2"><span id="variant-ev-gnomad-timestamp">&mdash;</span></dd>
-              <dt class="col-5 text-secondary">Source</dt>
+              <dt class="col-5 text-secondary">
+                <span class="d-inline-flex align-items-center">
+                  Source
+                  <button
+                    type="button"
+                    class="info-chip"
+                    data-tooltip-key="provenance.source"
+                    aria-label="Help: source"
+                  >
+                    ?
+                  </button>
+                </span>
+              </dt>
               <dd class="col-7 mb-0"><span id="variant-ev-gnomad-source">&mdash;</span></dd>
             </dl>
           </div>
@@ -1379,6 +1899,7 @@
       </div>
     </div>
 
+  <script src="{{ url_for('static', filename='tooltip_controls.js') }}"></script>
   <script src="{{ url_for('static', filename='run_controls.js') }}"></script>
   <script src="{{ url_for('static', filename='upload_controls.js') }}"></script>
   <script src="{{ url_for('static', filename='results_controls.js') }}"></script>
