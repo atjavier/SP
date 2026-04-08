@@ -1,4 +1,6 @@
-# SP
+# BioEvidence (SP)
+
+BioEvidence is the branded UI for SP. The app title/tagline shown in the UI are configurable via `APP_NAME` and `APP_TAGLINE`.
 
 ## Recommended Runtime (Windows)
 
@@ -10,12 +12,14 @@ Prerequisites:
 - Docker Desktop (WSL2 backend enabled)
 - At least ~60 GB free disk (VEP/SnpEff runtimes)
 - Additional disk for local evidence DBs (can be large; see local evidence notes below)
+- Optional local gnomAD v4.0 exomes: ~283 GB (plus indexes)
 
 ### Minimum Disk Mode (Recommended)
 
 If you want the smallest setup, keep local evidence DB installs disabled:
 - `INSTALL_DBSNP=0`
 - `INSTALL_CLINVAR=0`
+- `INSTALL_GNOMAD=0`
 - `SP_EVIDENCE_MODE=online`
 
 This avoids downloading local evidence files.
@@ -50,8 +54,8 @@ Notes:
 - Current compose profile sets `SP_EVIDENCE_MODE=hybrid` (local first, online fallback).
 
 Project decision:
-- gnomAD is kept online-only in this Special Problem due very large local dataset size.
-- Recommendation for future researchers: implement local gnomAD only when sufficient storage/compute resources are available.
+- gnomAD is **online by default** due to local dataset size.
+- Optional local gnomAD is supported when you have enough storage (see "Optional local gnomAD v4.0" below).
 
 ## Downloaded Files (Docker Init Jobs)
 
@@ -71,6 +75,8 @@ These files are downloaded/extracted by `sp-vep-init`, `sp-snpeff-init`, and `sp
 | `sp-evidence-init` | `clinvar_grch38.vcf.gz` | `/opt/evidence/clinvar/clinvar_grch38.vcf.gz` | Local ClinVar evidence database for clinical significance lookup in offline/hybrid mode. |
 | `sp-evidence-init` | `clinvar_grch38.vcf.gz.tbi` | `/opt/evidence/clinvar/clinvar_grch38.vcf.gz.tbi` | Tabix index for fast ClinVar position queries. |
 | `sp-evidence-init` | `evidence-manifest.env` | `/opt/evidence/evidence-manifest.env` | Records resolved local evidence paths used by the app. |
+| `sp-evidence-init` (optional) | `gnomad.exomes.v4.0.sites.chr*.vcf.bgz` | `/opt/evidence/gnomad/v4.0/exomes` | Local gnomAD v4.0 exomes sites VCFs (per-chrom). |
+| `sp-evidence-init` (optional) | `gnomad.exomes.v4.0.sites.chr*.vcf.bgz.tbi` | `/opt/evidence/gnomad/v4.0/exomes` | Tabix indexes for gnomAD local queries. |
 
 ### Why these are downloaded/installed
 
@@ -82,6 +88,7 @@ These files are downloaded/extracted by `sp-vep-init`, `sp-snpeff-init`, and `sp
 - `dbsnp_all_grch38.vcf.gz` + `.tbi` are downloaded so annotation can resolve rsIDs locally in `offline` mode (and in `hybrid` before API fallback).
 - `clinvar_grch38.vcf.gz` + `.tbi` are downloaded so annotation can resolve ClinVar IDs/significance locally in `offline` mode (and in `hybrid` before API fallback).
 - `evidence-manifest.env` is written to document the exact resolved local evidence paths that were initialized.
+- gnomAD v4.0 VCFs + indexes are optional and only downloaded when `INSTALL_GNOMAD=1` (large ~283 GB).
 
 Useful commands:
 
@@ -106,6 +113,12 @@ Troubleshooting:
 - If prediction fails with `ALPHAMISSENSE_NOT_AVAILABLE`, rerun:
   - `docker compose run --rm sp-vep-init`
   - then restart app: `docker compose up -d sp`
+
+## Docs + UI
+
+- In-app Docs: `GET /docs` (linked from the sidebar).
+- Sidebar is collapsible and persisted via localStorage.
+- Progress/Results include glossary tooltips for key terms (keyboard accessible).
 ## Runtime Contract (Docker profile)
 
 The app container uses:
@@ -120,10 +133,16 @@ Evidence runtime:
 - `SP_EVIDENCE_MODE=hybrid` (`online|offline|hybrid`)
 - `SP_DBSNP_LOCAL_VCF_PATH=/opt/evidence/dbsnp/dbsnp_all_grch38.vcf.gz`
 - `SP_CLINVAR_LOCAL_VCF_PATH=/opt/evidence/clinvar/clinvar_grch38.vcf.gz`
+- `SP_GNOMAD_LOCAL_VCF_PATH=/opt/evidence/gnomad/v4.0/exomes`
 
 Local evidence bootstrap tuning:
-- `INSTALL_DBSNP` / `INSTALL_CLINVAR` (`1|0`, default `1`)
+- `INSTALL_DBSNP` / `INSTALL_CLINVAR` / `INSTALL_GNOMAD` (`1|0`, default `1/1/0`)
 - `DBSNP_VCF_URL`, `CLINVAR_VCF_URL`
+- gnomAD v4.0 controls:
+  - `GNOMAD_VCF_BASE_URL`
+  - `GNOMAD_FILE_PREFIX`
+  - `GNOMAD_FILE_SUFFIX`
+  - `GNOMAD_CHROM_LIST`
 
 ## Share With Test Users
 
@@ -165,6 +184,8 @@ If the command appears to "hang", that's expected: the server is running in the 
 General:
 - `SP_HOST` (default: `127.0.0.1`)
 - `SP_PORT` (default: `8000`)
+- `APP_NAME` (default: `BioEvidence`)
+- `APP_TAGLINE` (default: `Teach and trace SNV outcomes.`)
 - `SP_DB_PATH` (default: `<repo_root>\instance\sp.db`)
 - `SP_MAX_UPLOAD_BYTES` (default: `52428800`)
 - `SP_MAX_VCF_DECOMPRESSED_BYTES` (default: `262144000`)
@@ -257,7 +278,14 @@ gnomAD:
 - `SP_GNOMAD_RETRY_BACKOFF_MAX_SECONDS` (default: `8`)
 - `SP_GNOMAD_MIN_REQUEST_INTERVAL_SECONDS` (default: `1.0`)
 - `SP_GNOMAD_MAX_WORKERS` (default: `1`)
-- Local gnomAD DB install is intentionally not part of this project's default setup due size constraints.
+- `SP_GNOMAD_LOCAL_VCF_PATH` (optional local/offline path; directory or file)
+- Local gnomAD install is disabled by default due size; enable with `INSTALL_GNOMAD=1` and v4.0 VCFs (~283 GB).
+
+Optional local gnomAD v4.0:
+- Set `INSTALL_GNOMAD=1`
+- Ensure `/opt/evidence/gnomad/v4.0/exomes` contains chr1-22, X, Y VCFs + `.tbi`
+- Validate with:
+  - `bash scripts/validate_gnomad_v4_local.sh /opt/evidence/gnomad/v4.0/exomes`
 
 Evidence profile behavior:
 - In `minimum_exome` profile, dbSNP/ClinVar/gnomAD API calls are skipped for variants classified outside coding scope.
