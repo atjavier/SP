@@ -21,6 +21,7 @@ Thumbs.db
 # App runtime artifacts (future stories)
 instance/
 *.log
+docs/project-scan-report.json
 
 # Local tool/download artifacts
 snpEff_latest_core.zip
