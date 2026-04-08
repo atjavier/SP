@@ -47,12 +47,18 @@ services:
       EVIDENCE_ROOT: /opt/evidence
       INSTALL_DBSNP: ${INSTALL_DBSNP:-1}
       INSTALL_CLINVAR: ${INSTALL_CLINVAR:-1}
+      INSTALL_GNOMAD: ${INSTALL_GNOMAD:-0}
       DBSNP_LOCAL_VCF_PATH: ${SP_DBSNP_LOCAL_VCF_PATH:-/opt/evidence/dbsnp/dbsnp_all_grch38.vcf.gz}
       DBSNP_VCF_URL: ${DBSNP_VCF_URL:-https://ftp.ncbi.nlm.nih.gov/snp/latest_release/VCF/GCF_000001405.40.gz}
       DBSNP_TBI_URL: ${DBSNP_TBI_URL:-https://ftp.ncbi.nlm.nih.gov/snp/latest_release/VCF/GCF_000001405.40.gz.tbi}
       CLINVAR_LOCAL_VCF_PATH: ${SP_CLINVAR_LOCAL_VCF_PATH:-/opt/evidence/clinvar/clinvar_grch38.vcf.gz}
       CLINVAR_VCF_URL: ${CLINVAR_VCF_URL:-https://ftp.ncbi.nlm.nih.gov/pub/clinvar/vcf_GRCh38/clinvar.vcf.gz}
       CLINVAR_TBI_URL: ${CLINVAR_TBI_URL:-https://ftp.ncbi.nlm.nih.gov/pub/clinvar/vcf_GRCh38/clinvar.vcf.gz.tbi}
+      GNOMAD_LOCAL_VCF_PATH: ${SP_GNOMAD_LOCAL_VCF_PATH:-/opt/evidence/gnomad/v4.0/exomes}
+      GNOMAD_VCF_BASE_URL: ${GNOMAD_VCF_BASE_URL:-https://hgdownload.soe.ucsc.edu/gbdb/hg38/gnomAD/v4/exomes}
+      GNOMAD_FILE_PREFIX: ${GNOMAD_FILE_PREFIX:-gnomad.exomes.v4.0.sites.chr}
+      GNOMAD_FILE_SUFFIX: ${GNOMAD_FILE_SUFFIX:-.vcf.bgz}
+      GNOMAD_CHROM_LIST: ${GNOMAD_CHROM_LIST:-1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 X Y}
     volumes:
       - evidence-data:/opt/evidence
     restart: "no"
@@ -98,6 +104,7 @@ services:
       SP_EVIDENCE_MODE: ${SP_EVIDENCE_MODE:-hybrid}
       SP_DBSNP_LOCAL_VCF_PATH: ${SP_DBSNP_LOCAL_VCF_PATH:-/opt/evidence/dbsnp/dbsnp_all_grch38.vcf.gz}
       SP_CLINVAR_LOCAL_VCF_PATH: ${SP_CLINVAR_LOCAL_VCF_PATH:-/opt/evidence/clinvar/clinvar_grch38.vcf.gz}
+      SP_GNOMAD_LOCAL_VCF_PATH: ${SP_GNOMAD_LOCAL_VCF_PATH:-/opt/evidence/gnomad/v4.0/exomes}
       SP_DBSNP_MAX_WORKERS: "4"
       SP_CLINVAR_MAX_WORKERS: "4"
       SP_GNOMAD_MAX_WORKERS: "2"

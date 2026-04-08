@@ -127,7 +127,9 @@ Significance:
 - Supports reduced network dependency for pilot/tester runs.
 - Runtime mode is controlled by `SP_EVIDENCE_MODE=online|offline|hybrid`.
 - Project decision: gnomAD local dataset bootstrap is disabled due size constraints; gnomAD is run online for this SP.
-- Future recommendation: researchers with sufficient resources can add local gnomAD bootstrap/workflows.
+- Default: gnomAD local bootstrap is disabled due to size; gnomAD runs online.
+- Optional: enable local gnomAD by setting `INSTALL_GNOMAD=1` in `docker-compose` (sp-evidence-init) and providing local VCFs.
+- Recommended local dataset: gnomAD v4.0 exomes sites VCFs (per-chrom files), stored under `/opt/evidence/gnomad/v4.0/exomes`.
 
 ---
 

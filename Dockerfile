@@ -3,6 +3,18 @@ FROM python:3.11-slim
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1
 
+# Optional evidence toggles (used by setup_evidence_runtime.sh in init containers)
+ARG INSTALL_GNOMAD=0
+ARG GNOMAD_VCF_BASE_URL=https://hgdownload.soe.ucsc.edu/gbdb/hg38/gnomAD/v4/exomes
+ARG GNOMAD_FILE_PREFIX=gnomad.exomes.v4.0.sites.chr
+ARG GNOMAD_FILE_SUFFIX=.vcf.bgz
+ARG GNOMAD_CHROM_LIST="1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 X Y"
+ENV INSTALL_GNOMAD=${INSTALL_GNOMAD} \
+    GNOMAD_VCF_BASE_URL=${GNOMAD_VCF_BASE_URL} \
+    GNOMAD_FILE_PREFIX=${GNOMAD_FILE_PREFIX} \
+    GNOMAD_FILE_SUFFIX=${GNOMAD_FILE_SUFFIX} \
+    GNOMAD_CHROM_LIST=${GNOMAD_CHROM_LIST}
+
 RUN apt-get update && apt-get install -y --no-install-recommends \
     bash \
     build-essential \

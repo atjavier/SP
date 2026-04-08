@@ -6,6 +6,7 @@ READY_MARKER="${EVIDENCE_ROOT}/.evidence-ready"
 
 INSTALL_DBSNP="${INSTALL_DBSNP:-1}"
 INSTALL_CLINVAR="${INSTALL_CLINVAR:-1}"
+INSTALL_GNOMAD="${INSTALL_GNOMAD:-0}"
 
 DBSNP_LOCAL_VCF_PATH="${DBSNP_LOCAL_VCF_PATH:-${EVIDENCE_ROOT}/dbsnp/dbsnp_all_grch38.vcf.gz}"
 DBSNP_VCF_URL="${DBSNP_VCF_URL:-https://ftp.ncbi.nlm.nih.gov/snp/latest_release/VCF/GCF_000001405.40.gz}"
@@ -15,10 +16,16 @@ CLINVAR_LOCAL_VCF_PATH="${CLINVAR_LOCAL_VCF_PATH:-${EVIDENCE_ROOT}/clinvar/clinv
 CLINVAR_VCF_URL="${CLINVAR_VCF_URL:-https://ftp.ncbi.nlm.nih.gov/pub/clinvar/vcf_GRCh38/clinvar.vcf.gz}"
 CLINVAR_TBI_URL="${CLINVAR_TBI_URL:-${CLINVAR_VCF_URL}.tbi}"
 
+GNOMAD_LOCAL_VCF_PATH="${GNOMAD_LOCAL_VCF_PATH:-${EVIDENCE_ROOT}/gnomad/v4.0/exomes}"
+GNOMAD_VCF_BASE_URL="${GNOMAD_VCF_BASE_URL:-https://hgdownload.soe.ucsc.edu/gbdb/hg38/gnomAD/v4/exomes}"
+GNOMAD_FILE_PREFIX="${GNOMAD_FILE_PREFIX:-gnomad.exomes.v4.0.sites.chr}"
+GNOMAD_FILE_SUFFIX="${GNOMAD_FILE_SUFFIX:-.vcf.bgz}"
+GNOMAD_CHROM_LIST="${GNOMAD_CHROM_LIST:-1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 X Y}"
+
 echo "[setup_evidence_runtime] EVIDENCE_ROOT=${EVIDENCE_ROOT}"
 echo "[setup_evidence_runtime] INSTALL_DBSNP=${INSTALL_DBSNP}"
 echo "[setup_evidence_runtime] INSTALL_CLINVAR=${INSTALL_CLINVAR}"
-echo "[setup_evidence_runtime] INSTALL_GNOMAD=0 (disabled by project decision; gnomAD remains online)"
+echo "[setup_evidence_runtime] INSTALL_GNOMAD=${INSTALL_GNOMAD}"
 
 mkdir -p "${EVIDENCE_ROOT}"
 
@@ -70,11 +77,26 @@ if [ "${INSTALL_CLINVAR}" = "1" ]; then
   ensure_tabix_index "${CLINVAR_LOCAL_VCF_PATH}" "${CLINVAR_TBI_URL}"
 fi
 
+if [ "${INSTALL_GNOMAD}" = "1" ]; then
+  mkdir -p "${GNOMAD_LOCAL_VCF_PATH}"
+  for chrom in ${GNOMAD_CHROM_LIST}; do
+    file_name="${GNOMAD_FILE_PREFIX}${chrom}${GNOMAD_FILE_SUFFIX}"
+    file_url="${GNOMAD_VCF_BASE_URL}/${file_name}"
+    file_path="${GNOMAD_LOCAL_VCF_PATH}/${file_name}"
+    download_file_if_missing "${file_url}" "${file_path}"
+    ensure_tabix_index "${file_path}" "${file_url}.tbi"
+  done
+fi
+
 {
   echo "SP_DBSNP_LOCAL_VCF_PATH=${DBSNP_LOCAL_VCF_PATH}"
   echo "SP_CLINVAR_LOCAL_VCF_PATH=${CLINVAR_LOCAL_VCF_PATH}"
-  echo "SP_GNOMAD_LOCAL_VCF_PATH="
-  echo "SP_GNOMAD_MODE=online"
+  if [ "${INSTALL_GNOMAD}" = "1" ]; then
+    echo "SP_GNOMAD_LOCAL_VCF_PATH=${GNOMAD_LOCAL_VCF_PATH}"
+  else
+    echo "SP_GNOMAD_LOCAL_VCF_PATH="
+  fi
+  echo "SP_EVIDENCE_MODE=${SP_EVIDENCE_MODE:-online}"
 } > "${EVIDENCE_ROOT}/evidence-manifest.env"
 
 touch "${READY_MARKER}"
