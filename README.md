@@ -119,6 +119,26 @@ Troubleshooting:
 - In-app Docs: `GET /docs` (linked from the sidebar).
 - Sidebar is collapsible and persisted via localStorage.
 - Progress/Results include glossary tooltips for key terms (keyboard accessible).
+
+## Core Workflow
+
+- **Start**: choose a VCF and press `Start`. The app validates first, then runs the pipeline if valid.
+- **New run**: resets to a fresh run record.
+- **Pipeline stages**: Parser → Pre-Annotation → Classification → Prediction → Annotation → Reporting.
+- **No raw VCF retention by default**: the upload is used for parsing, then discarded; derived records remain in SQLite.
+
+## Run Controls + Live Updates
+
+- **Progress tab** shows run summary (run ID, status, reference build, evidence mode/policy) plus stage status.
+- **Cancel run** is available while running.
+- **Retry from failed stage** is available when a stage fails.
+- **Live updates** are delivered via SSE for run status, stage status, variant results, and logs.
+- **Run logs** surface recent, run-scoped log lines and avoid raw VCF content.
+
+## Results Explorer
+
+- Stage-specific tables are shown in Results as stages complete.
+- Variant detail panel shows evidence + predictor outputs with provenance and completeness labels.
 ## Runtime Contract (Docker profile)
 
 The app container uses:
