@@ -210,8 +210,26 @@ if [ ! -d "${VEP_CACHE_VERSION_DIR}" ]; then
     download_file_if_missing "${VEP_CACHE_TAR_URL}" "${VEP_CACHE_TAR_PATH}"
     echo "[setup_vep_runtime] Extracting VEP cache tarball"
     tar -xzf "${VEP_CACHE_TAR_PATH}" -C "${VEP_CACHE_SPECIES_DIR}"
-    if [ -d "${VEP_CACHE_TAR_DIR}" ] && [ ! -d "${VEP_CACHE_VERSION_DIR}" ]; then
-      mv "${VEP_CACHE_TAR_DIR}" "${VEP_CACHE_VERSION_DIR}"
+    if [ ! -d "${VEP_CACHE_VERSION_DIR}" ]; then
+      if [ -d "${VEP_CACHE_TAR_DIR}" ]; then
+        mv "${VEP_CACHE_TAR_DIR}" "${VEP_CACHE_VERSION_DIR}"
+      elif [ -d "${VEP_CACHE_SPECIES_DIR}/${VEP_SPECIES}/${VEP_CACHE_VERSION}" ]; then
+        mv "${VEP_CACHE_SPECIES_DIR}/${VEP_SPECIES}/${VEP_CACHE_VERSION}" "${VEP_CACHE_VERSION_DIR}"
+      fi
+    fi
+    if [ ! -d "${VEP_CACHE_VERSION_DIR}" ]; then
+      echo "[setup_vep_runtime] Cache directory still missing after tar extract; falling back to INSTALL.pl"
+      perl INSTALL.pl \
+        --NO_UPDATE \
+        --NO_TEST \
+        --NO_HTSLIB \
+        --AUTO c \
+        --USE_HTTPS_PROTO \
+        --SPECIES "${VEP_SPECIES}" \
+        --ASSEMBLY "${VEP_ASSEMBLY}" \
+        --DESTDIR "${VEP_DIR}" \
+        --CACHEDIR "${VEP_CACHE_DIR}" \
+        --PLUGINSDIR "${VEP_PLUGIN_DIR}"
     fi
   else
     perl INSTALL.pl \
