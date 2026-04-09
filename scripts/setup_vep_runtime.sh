@@ -19,6 +19,10 @@ ALPHAMISSENSE_URL="${ALPHAMISSENSE_URL:-https://storage.googleapis.com/dm_alpham
 ALPHAMISSENSE_FILE="${VEP_PLUGIN_DIR}/${ALPHAMISSENSE_FILE_NAME}"
 READY_MARKER="${VEP_ROOT}/.vep-ready"
 REQUIRED_API_FILE="${VEP_DIR}/Bio/EnsEMBL/Variation/DBSQL/VariationFeatureAdaptor.pm"
+ARIA2C_CONN="${ARIA2C_CONN:-}"
+ARIA2C_MIN_CONN="${ARIA2C_MIN_CONN:-4}"
+ARIA2C_MAX_CONN="${ARIA2C_MAX_CONN:-16}"
+ARIA2C_SEGMENT_SIZE="${ARIA2C_SEGMENT_SIZE:-1M}"
 
 export HOME="${HOME:-/root}"
 export PERL5LIB="${VEP_DIR}:${VEP_DIR}/modules:${PERL5LIB:-}"
@@ -31,6 +35,7 @@ echo "[setup_vep_runtime] VEP_CACHE_DIR=${VEP_CACHE_DIR}"
 echo "[setup_vep_runtime] VEP_CACHE_VERSION_DIR=${VEP_CACHE_VERSION_DIR}"
 echo "[setup_vep_runtime] VEP_PLUGIN_DIR=${VEP_PLUGIN_DIR}"
 echo "[setup_vep_runtime] VEP_CACHE_TAR_URL=${VEP_CACHE_TAR_URL}"
+echo "[setup_vep_runtime] ARIA2C_CONN=${ARIA2C_CONN:-auto} (min=${ARIA2C_MIN_CONN}, max=${ARIA2C_MAX_CONN}, segment=${ARIA2C_SEGMENT_SIZE})"
 
 mkdir -p "${VEP_ROOT}" "${VEP_CACHE_DIR}" "${VEP_PLUGIN_DIR}" "${VEP_CACHE_SPECIES_DIR}" "$(dirname "${VEP_CACHE_TAR_PATH}")"
 
@@ -44,12 +49,52 @@ download_file_if_missing() {
   mkdir -p "$(dirname "${destination}")"
   echo "[setup_vep_runtime] Downloading ${url}"
   if command -v aria2c >/dev/null 2>&1; then
-    aria2c -x 8 -s 8 -k 1M -c --file-allocation=none \
+    local conn
+    conn="$(choose_aria2c_connections "${url}")"
+    aria2c -x "${conn}" -s "${conn}" -k "${ARIA2C_SEGMENT_SIZE}" -c --file-allocation=none \
       -d "$(dirname "${destination}")" -o "$(basename "${destination}").part" "${url}"
   else
     curl -fL --retry 5 --retry-delay 2 --retry-all-errors "${url}" -o "${destination}.part"
   fi
   mv "${destination}.part" "${destination}"
+}
+
+get_content_length() {
+  local url="$1"
+  curl -sIL "${url}" | awk 'tolower($1)=="content-length:" {print $2}' | tail -n 1 | tr -d '\r'
+}
+
+choose_aria2c_connections() {
+  local url="$1"
+  if [ -n "${ARIA2C_CONN}" ]; then
+    echo "${ARIA2C_CONN}"
+    return 0
+  fi
+
+  local length conn
+  length="$(get_content_length "${url}")"
+  if [ -n "${length}" ] && [ "${length}" -gt 0 ] 2>/dev/null; then
+    if [ "${length}" -lt 536870912 ]; then
+      conn=4
+    elif [ "${length}" -lt 2147483648 ]; then
+      conn=8
+    elif [ "${length}" -lt 8589934592 ]; then
+      conn=16
+    else
+      conn=16
+    fi
+  else
+    conn=8
+  fi
+
+  if [ "${conn}" -lt "${ARIA2C_MIN_CONN}" ]; then
+    conn="${ARIA2C_MIN_CONN}"
+  fi
+  if [ "${conn}" -gt "${ARIA2C_MAX_CONN}" ]; then
+    conn="${ARIA2C_MAX_CONN}"
+  fi
+
+  echo "${conn}"
 }
 
 check_vep_perl_runtime() {

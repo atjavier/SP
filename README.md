@@ -70,6 +70,7 @@ Notes:
 - If `docker compose build` fails with an image export conflict like `image "sp-local:latest": already exists`, build only once with one of these: `docker compose build sp`, `docker compose build --parallel=false`, or `COMPOSE_BAKE=false docker compose build`.
 - Local evidence downloads use `aria2c` (multi-connection) when available; rebuild the image to pick up download speed improvements.
 - VEP cache and AlphaMissense downloads also use `aria2c` when available; rebuild the image to pick up download speed improvements.
+- aria2 tuning (optional): set `ARIA2C_CONN` (fixed) or `ARIA2C_MIN_CONN`/`ARIA2C_MAX_CONN` (auto range) and `ARIA2C_SEGMENT_SIZE` (default `1M`).
 
 Project decision:
 - gnomAD is **online by default** due to local dataset size.

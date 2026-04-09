@@ -7,6 +7,10 @@ READY_MARKER="${EVIDENCE_ROOT}/.evidence-ready"
 INSTALL_DBSNP="${INSTALL_DBSNP:-1}"
 INSTALL_CLINVAR="${INSTALL_CLINVAR:-1}"
 INSTALL_GNOMAD="${INSTALL_GNOMAD:-0}"
+ARIA2C_CONN="${ARIA2C_CONN:-}"
+ARIA2C_MIN_CONN="${ARIA2C_MIN_CONN:-4}"
+ARIA2C_MAX_CONN="${ARIA2C_MAX_CONN:-16}"
+ARIA2C_SEGMENT_SIZE="${ARIA2C_SEGMENT_SIZE:-1M}"
 
 DBSNP_LOCAL_VCF_PATH="${DBSNP_LOCAL_VCF_PATH:-${EVIDENCE_ROOT}/dbsnp/dbsnp_all_grch38.vcf.gz}"
 DBSNP_VCF_URL="${DBSNP_VCF_URL:-https://ftp.ncbi.nlm.nih.gov/snp/latest_release/VCF/GCF_000001405.40.gz}"
@@ -26,6 +30,7 @@ echo "[setup_evidence_runtime] EVIDENCE_ROOT=${EVIDENCE_ROOT}"
 echo "[setup_evidence_runtime] INSTALL_DBSNP=${INSTALL_DBSNP}"
 echo "[setup_evidence_runtime] INSTALL_CLINVAR=${INSTALL_CLINVAR}"
 echo "[setup_evidence_runtime] INSTALL_GNOMAD=${INSTALL_GNOMAD}"
+echo "[setup_evidence_runtime] ARIA2C_CONN=${ARIA2C_CONN:-auto} (min=${ARIA2C_MIN_CONN}, max=${ARIA2C_MAX_CONN}, segment=${ARIA2C_SEGMENT_SIZE})"
 
 mkdir -p "${EVIDENCE_ROOT}"
 
@@ -44,12 +49,52 @@ download_file_if_missing() {
   mkdir -p "$(dirname "${destination}")"
   echo "[setup_evidence_runtime] Downloading ${url}"
   if command -v aria2c >/dev/null 2>&1; then
-    aria2c -x 8 -s 8 -k 1M -c --file-allocation=none \
+    local conn
+    conn="$(choose_aria2c_connections "${url}")"
+    aria2c -x "${conn}" -s "${conn}" -k "${ARIA2C_SEGMENT_SIZE}" -c --file-allocation=none \
       -d "$(dirname "${destination}")" -o "$(basename "${destination}").part" "${url}"
   else
     curl -fL --retry 5 --retry-delay 2 --retry-all-errors "${url}" -o "${destination}.part"
   fi
   mv "${destination}.part" "${destination}"
+}
+
+get_content_length() {
+  local url="$1"
+  curl -sIL "${url}" | awk 'tolower($1)=="content-length:" {print $2}' | tail -n 1 | tr -d '\r'
+}
+
+choose_aria2c_connections() {
+  local url="$1"
+  if [ -n "${ARIA2C_CONN}" ]; then
+    echo "${ARIA2C_CONN}"
+    return 0
+  fi
+
+  local length conn
+  length="$(get_content_length "${url}")"
+  if [ -n "${length}" ] && [ "${length}" -gt 0 ] 2>/dev/null; then
+    if [ "${length}" -lt 536870912 ]; then
+      conn=4
+    elif [ "${length}" -lt 2147483648 ]; then
+      conn=8
+    elif [ "${length}" -lt 8589934592 ]; then
+      conn=16
+    else
+      conn=16
+    fi
+  else
+    conn=8
+  fi
+
+  if [ "${conn}" -lt "${ARIA2C_MIN_CONN}" ]; then
+    conn="${ARIA2C_MIN_CONN}"
+  fi
+  if [ "${conn}" -gt "${ARIA2C_MAX_CONN}" ]; then
+    conn="${ARIA2C_MAX_CONN}"
+  fi
+
+  echo "${conn}"
 }
 
 ensure_tabix_index() {
@@ -62,7 +107,9 @@ ensure_tabix_index() {
 
   if [ -n "${tbi_url}" ]; then
     if command -v aria2c >/dev/null 2>&1; then
-      if aria2c -x 4 -s 4 -k 1M -c --file-allocation=none \
+      local conn
+      conn="$(choose_aria2c_connections "${tbi_url}")"
+      if aria2c -x "${conn}" -s "${conn}" -k "${ARIA2C_SEGMENT_SIZE}" -c --file-allocation=none \
         -d "$(dirname "${vcf_path}")" -o "$(basename "${vcf_path}").tbi" "${tbi_url}"; then
         echo "[setup_evidence_runtime] Downloaded tabix index from ${tbi_url}"
         return 0
