@@ -43,7 +43,12 @@ download_file_if_missing() {
   fi
   mkdir -p "$(dirname "${destination}")"
   echo "[setup_evidence_runtime] Downloading ${url}"
-  curl -fL --retry 5 --retry-delay 2 --retry-all-errors "${url}" -o "${destination}.part"
+  if command -v aria2c >/dev/null 2>&1; then
+    aria2c -x 8 -s 8 -k 1M -c --file-allocation=none \
+      -d "$(dirname "${destination}")" -o "$(basename "${destination}").part" "${url}"
+  else
+    curl -fL --retry 5 --retry-delay 2 --retry-all-errors "${url}" -o "${destination}.part"
+  fi
   mv "${destination}.part" "${destination}"
 }
 
@@ -56,7 +61,13 @@ ensure_tabix_index() {
   fi
 
   if [ -n "${tbi_url}" ]; then
-    if curl -fL --retry 3 --retry-delay 2 "${tbi_url}" -o "${vcf_path}.tbi"; then
+    if command -v aria2c >/dev/null 2>&1; then
+      if aria2c -x 4 -s 4 -k 1M -c --file-allocation=none \
+        -d "$(dirname "${vcf_path}")" -o "$(basename "${vcf_path}").tbi" "${tbi_url}"; then
+        echo "[setup_evidence_runtime] Downloaded tabix index from ${tbi_url}"
+        return 0
+      fi
+    elif curl -fL --retry 3 --retry-delay 2 "${tbi_url}" -o "${vcf_path}.tbi"; then
       echo "[setup_evidence_runtime] Downloaded tabix index from ${tbi_url}"
       return 0
     fi

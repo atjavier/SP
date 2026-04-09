@@ -16,6 +16,7 @@ ENV INSTALL_GNOMAD=${INSTALL_GNOMAD} \
     GNOMAD_CHROM_LIST=${GNOMAD_CHROM_LIST}
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
+    aria2 \
     bash \
     build-essential \
     ca-certificates \

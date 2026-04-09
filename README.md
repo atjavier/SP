@@ -14,6 +14,21 @@ Prerequisites:
 - Additional disk for local evidence DBs (can be large; see local evidence notes below)
 - Optional local gnomAD v4.0 exomes: ~283 GB (plus indexes)
 
+### From Scratch (Fresh Clone)
+
+From repo root:
+
+```powershell
+cd "C:\Users\Adrian Javier\Desktop\UPLB Docs\SP"
+docker compose build sp
+docker compose up -d sp
+```
+
+Open `http://127.0.0.1:8000/`.
+
+If init jobs fail on line 2 with `set -euo pipefail` (CRLF issue on another device), run:
+`git config --local core.autocrlf false`, then `git checkout -- scripts/*.sh`, then repeat the build.
+
 ### Minimum Disk Mode (Recommended)
 
 If you want the smallest setup, keep local evidence DB installs disabled:
@@ -52,6 +67,8 @@ Notes:
 - Evidence annotation is enforced as missense-only; compose sets `SP_EVIDENCE_PROFILE=predictor_only`.
 - Current compose profile enables local dbSNP + ClinVar install by default.
 - Current compose profile sets `SP_EVIDENCE_MODE=hybrid` (local first, online fallback).
+- If `docker compose build` fails with an image export conflict like `image "sp-local:latest": already exists`, build only once with one of these: `docker compose build sp`, `docker compose build --parallel=false`, or `COMPOSE_BAKE=false docker compose build`.
+- Local evidence downloads use `aria2c` (multi-connection) when available; rebuild the image to pick up download speed improvements.
 
 Project decision:
 - gnomAD is **online by default** due to local dataset size.
@@ -110,9 +127,8 @@ docker compose down -v
 
 Troubleshooting:
 - If Docker Compose fails with `unexpected character "\ufeff"` on line 1 of `.env`, re-save `.env` as UTF-8 **without BOM**.
-- If prediction fails with `ALPHAMISSENSE_NOT_AVAILABLE`, rerun:
-  - `docker compose run --rm sp-vep-init`
-  - then restart app: `docker compose up -d sp`
+- If prediction fails with `ALPHAMISSENSE_NOT_AVAILABLE`, rerun `docker compose run --rm sp-vep-init`, then restart with `docker compose up -d sp`.
+- If init jobs fail on line 2 with `set -euo pipefail`, the `.sh` files were checked out with CRLF. Re-checkout with LF and rebuild with `git config --local core.autocrlf false`, `git checkout -- scripts/*.sh`, then `docker compose build --no-cache`.
 
 ## Docs + UI
 
