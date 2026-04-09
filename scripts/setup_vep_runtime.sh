@@ -11,6 +11,9 @@ VEP_CACHE_DIR="${VEP_CACHE_DIR:-${VEP_ROOT}/.vep}"
 VEP_CACHE_SPECIES_DIR="${VEP_CACHE_DIR}/${VEP_SPECIES}"
 VEP_CACHE_VERSION_DIR="${VEP_CACHE_SPECIES_DIR}/${VEP_CACHE_VERSION}"
 VEP_PLUGIN_DIR="${VEP_PLUGIN_DIR:-${VEP_CACHE_DIR}/Plugins}"
+VEP_CACHE_TAR_URL="${VEP_CACHE_TAR_URL:-https://ftp.ensembl.org/pub/release-${VEP_RELEASE}/variation/indexed_vep_cache/${VEP_SPECIES}_vep_${VEP_CACHE_VERSION}.tar.gz}"
+VEP_CACHE_TAR_PATH="${VEP_CACHE_TAR_PATH:-${VEP_ROOT}/.cache/${VEP_SPECIES}_vep_${VEP_CACHE_VERSION}.tar.gz}"
+VEP_CACHE_TAR_DIR="${VEP_CACHE_SPECIES_DIR}/${VEP_SPECIES}_vep_${VEP_CACHE_VERSION}"
 ALPHAMISSENSE_FILE_NAME="${ALPHAMISSENSE_FILE_NAME:-AlphaMissense_hg38.tsv.gz}"
 ALPHAMISSENSE_URL="${ALPHAMISSENSE_URL:-https://storage.googleapis.com/dm_alphamissense/AlphaMissense_hg38.tsv.gz}"
 ALPHAMISSENSE_FILE="${VEP_PLUGIN_DIR}/${ALPHAMISSENSE_FILE_NAME}"
@@ -27,8 +30,27 @@ echo "[setup_vep_runtime] VEP_RELEASE=${VEP_RELEASE}"
 echo "[setup_vep_runtime] VEP_CACHE_DIR=${VEP_CACHE_DIR}"
 echo "[setup_vep_runtime] VEP_CACHE_VERSION_DIR=${VEP_CACHE_VERSION_DIR}"
 echo "[setup_vep_runtime] VEP_PLUGIN_DIR=${VEP_PLUGIN_DIR}"
+echo "[setup_vep_runtime] VEP_CACHE_TAR_URL=${VEP_CACHE_TAR_URL}"
 
-mkdir -p "${VEP_ROOT}" "${VEP_CACHE_DIR}" "${VEP_PLUGIN_DIR}"
+mkdir -p "${VEP_ROOT}" "${VEP_CACHE_DIR}" "${VEP_PLUGIN_DIR}" "${VEP_CACHE_SPECIES_DIR}" "$(dirname "${VEP_CACHE_TAR_PATH}")"
+
+download_file_if_missing() {
+  local url="$1"
+  local destination="$2"
+  if [ -f "${destination}" ]; then
+    echo "[setup_vep_runtime] Reusing existing file ${destination}"
+    return 0
+  fi
+  mkdir -p "$(dirname "${destination}")"
+  echo "[setup_vep_runtime] Downloading ${url}"
+  if command -v aria2c >/dev/null 2>&1; then
+    aria2c -x 8 -s 8 -k 1M -c --file-allocation=none \
+      -d "$(dirname "${destination}")" -o "$(basename "${destination}").part" "${url}"
+  else
+    curl -fL --retry 5 --retry-delay 2 --retry-all-errors "${url}" -o "${destination}.part"
+  fi
+  mv "${destination}.part" "${destination}"
+}
 
 check_vep_perl_runtime() {
   perl \
@@ -139,24 +161,33 @@ fi
 
 if [ ! -d "${VEP_CACHE_VERSION_DIR}" ]; then
   echo "[setup_vep_runtime] Installing VEP cache ${VEP_SPECIES}/${VEP_CACHE_VERSION}"
-  perl INSTALL.pl \
-    --NO_UPDATE \
-    --NO_TEST \
-    --NO_HTSLIB \
-    --AUTO c \
-    --USE_HTTPS_PROTO \
-    --SPECIES "${VEP_SPECIES}" \
-    --ASSEMBLY "${VEP_ASSEMBLY}" \
-    --DESTDIR "${VEP_DIR}" \
-    --CACHEDIR "${VEP_CACHE_DIR}" \
-    --PLUGINSDIR "${VEP_PLUGIN_DIR}"
+  if command -v aria2c >/dev/null 2>&1; then
+    download_file_if_missing "${VEP_CACHE_TAR_URL}" "${VEP_CACHE_TAR_PATH}"
+    echo "[setup_vep_runtime] Extracting VEP cache tarball"
+    tar -xzf "${VEP_CACHE_TAR_PATH}" -C "${VEP_CACHE_SPECIES_DIR}"
+    if [ -d "${VEP_CACHE_TAR_DIR}" ] && [ ! -d "${VEP_CACHE_VERSION_DIR}" ]; then
+      mv "${VEP_CACHE_TAR_DIR}" "${VEP_CACHE_VERSION_DIR}"
+    fi
+  else
+    perl INSTALL.pl \
+      --NO_UPDATE \
+      --NO_TEST \
+      --NO_HTSLIB \
+      --AUTO c \
+      --USE_HTTPS_PROTO \
+      --SPECIES "${VEP_SPECIES}" \
+      --ASSEMBLY "${VEP_ASSEMBLY}" \
+      --DESTDIR "${VEP_DIR}" \
+      --CACHEDIR "${VEP_CACHE_DIR}" \
+      --PLUGINSDIR "${VEP_PLUGIN_DIR}"
+  fi
 else
   echo "[setup_vep_runtime] Cache directory already present at ${VEP_CACHE_VERSION_DIR}"
 fi
 
 if [ ! -f "${ALPHAMISSENSE_FILE}" ]; then
   echo "[setup_vep_runtime] Downloading AlphaMissense data from ${ALPHAMISSENSE_URL}"
-  curl -fL "${ALPHAMISSENSE_URL}" -o "${ALPHAMISSENSE_FILE}"
+  download_file_if_missing "${ALPHAMISSENSE_URL}" "${ALPHAMISSENSE_FILE}"
 else
   echo "[setup_vep_runtime] AlphaMissense data already present at ${ALPHAMISSENSE_FILE}"
 fi

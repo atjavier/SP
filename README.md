@@ -69,6 +69,7 @@ Notes:
 - Current compose profile sets `SP_EVIDENCE_MODE=hybrid` (local first, online fallback).
 - If `docker compose build` fails with an image export conflict like `image "sp-local:latest": already exists`, build only once with one of these: `docker compose build sp`, `docker compose build --parallel=false`, or `COMPOSE_BAKE=false docker compose build`.
 - Local evidence downloads use `aria2c` (multi-connection) when available; rebuild the image to pick up download speed improvements.
+- VEP cache and AlphaMissense downloads also use `aria2c` when available; rebuild the image to pick up download speed improvements.
 
 Project decision:
 - gnomAD is **online by default** due to local dataset size.
