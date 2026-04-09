@@ -27,8 +27,11 @@
             </p>
             <nav aria-label="Documentation sections">
               <div class="list-group list-group-flush">
+                <a class="list-group-item list-group-item-action" href="#docs-how-to-use">
+                  How to Use the App
+                </a>
                 <a class="list-group-item list-group-item-action" href="#docs-getting-started">
-                  Getting Started
+                  Input Preparation
                 </a>
                 <a class="list-group-item list-group-item-action" href="#docs-pipeline-stages">
                   Pipeline Stages
@@ -53,44 +56,86 @@
     </aside>
 
     <div class="col-12 col-lg-9">
+      <section class="card shadow-sm mb-4" id="docs-how-to-use">
+        <div class="card-body">
+          <h2 class="h5 mb-3">How to Use the App</h2>
+          <p class="text-secondary mb-3">
+            A practical, task-focused walkthrough of a typical run. Follow this first if you are new.
+          </p>
+
+          <div class="mb-3">
+            <h3 class="h6 text-secondary text-uppercase mb-2">Quick Start (5 Steps)</h3>
+            <ol class="mb-0">
+              <li>Select a VCF or VCF.GZ file in the <strong>Start</strong> card.</li>
+              <li>Pick an evidence failure behavior (stop on failure or continue with partial evidence).</li>
+              <li>Press <strong>Start</strong> to validate and launch the pipeline.</li>
+              <li>Watch the <strong>Progress</strong> tab for stage status, timings, and logs.</li>
+              <li>Open the <strong>Results</strong> tab to inspect stage outputs and summaries.</li>
+            </ol>
+          </div>
+
+          <div class="mb-3">
+            <h3 class="h6 text-secondary text-uppercase mb-2">During a Run</h3>
+            <ul class="mb-0">
+              <li><strong>Retry failed stage:</strong> Appears when a stage fails and the run is not active.</li>
+              <li><strong>Cancel run:</strong> Stops an active run safely and records the canceled state.</li>
+              <li><strong>Run logs:</strong> Show the latest log lines and auto-refresh while running.</li>
+            </ul>
+          </div>
+
+          <div>
+            <h3 class="h6 text-secondary text-uppercase mb-2">After a Run</h3>
+            <ul class="mb-0">
+              <li><strong>Stage tabs:</strong> Parser, Pre-annotation, Consequence, Prediction, and Evidence annotation show raw outputs.</li>
+              <li><strong>Reports tab:</strong> Aggregated highlights and diagnostics from the reporting stage.</li>
+              <li><strong>Variant details:</strong> Click a variant row to inspect per-tool evidence, scores, and reason fields.</li>
+            </ul>
+          </div>
+        </div>
+      </section>
+
       <section class="card shadow-sm mb-4" id="docs-getting-started">
         <div class="card-body">
-          <h2 class="h5 mb-3">Getting Started</h2>
+          <h2 class="h5 mb-3">Input Preparation</h2>
           <div class="mb-3">
             <h3 class="h6 text-secondary text-uppercase mb-2">Input Requirements</h3>
             <ul class="mb-0">
               <li>
-                <strong>Accepted files:</strong> VCF and VCF.GZ inputs containing human single-nucleotide variants (SNVs).
-                Multi-allelic sites are split into per-allele records when applicable. Non-SNV entries are flagged or excluded.
+                <strong>Accepted files:</strong> VCF and VCF.GZ containing human single-nucleotide variants (SNVs).
+                Non-SNV entries are flagged or excluded.
               </li>
               <li>
-                <strong>Core fields:</strong> Standard VCF headers (<code>#CHROM</code>, <code>POS</code>, <code>REF</code>,
-                <code>ALT</code>) are required. Sample columns are accepted if present.
+                <strong>Required fields:</strong> Standard VCF headers (<code>#CHROM</code>, <code>POS</code>, <code>REF</code>, <code>ALT</code>).
+                Sample columns are accepted if present.
               </li>
               <li>
-                <strong>Reference build:</strong> The run stores a reference build value that should match your inputs and
-                downstream evidence sources. Mismatched builds can cause missing evidence or incorrect IDs.
+                <strong>Reference build:</strong> Must match your inputs and evidence sources to avoid missing IDs.
               </li>
               <li>
-                <strong>Normalization:</strong> Provide left-aligned, normalized SNVs whenever possible so evidence lookups
-                align with database records.
+                <strong>Normalization:</strong> Provide left-aligned, normalized SNVs so evidence lookups align with databases.
               </li>
             </ul>
           </div>
           <div class="mb-3">
-            <h3 class="h6 text-secondary text-uppercase mb-2">Pre-run Checklist</h3>
+            <h3 class="h6 text-secondary text-uppercase mb-2">Run Setup Decisions</h3>
             <ul class="mb-0">
               <li><strong>VCF validation:</strong> Fix malformed headers or invalid REF/ALT fields before upload.</li>
-              <li><strong>Evidence mode:</strong> Choose online, offline, or hybrid based on available local databases.</li>
-              <li><strong>Failure policy:</strong> Decide whether evidence failures should stop the run or continue with partial data.</li>
+              <li>
+                <strong>Evidence failure behavior:</strong> Choose <em>Stop</em> or <em>Continue</em> in the Start card
+                before running.
+              </li>
+              <li>
+                <strong>Evidence mode:</strong> Configured by deployment (online, offline, or hybrid) and reported in the
+                annotation stage stats.
+              </li>
             </ul>
           </div>
           <div>
-            <h3 class="h6 text-secondary text-uppercase mb-2">Run Basics</h3>
+            <h3 class="h6 text-secondary text-uppercase mb-2">What to Expect</h3>
             <ul class="mb-0">
-              <li><strong>Run flow:</strong> Upload -> validate -> pipeline stages execute sequentially with live status updates.</li>
-              <li><strong>Run ID:</strong> Each run receives a unique identifier used for logs, stages, and results retrieval.</li>
-              <li><strong>Scope:</strong> {{ app_name }} is built for research and teaching workflows, emphasizing transparency over clinical diagnosis.</li>
+              <li><strong>Run flow:</strong> Upload -> validate -> sequential pipeline stages with live status updates.</li>
+              <li><strong>Run ID:</strong> Used for logs, stage status, and result retrieval.</li>
+              <li><strong>Scope:</strong> {{ app_name }} supports research and teaching workflows, not clinical diagnosis.</li>
             </ul>
           </div>
         </div>
@@ -103,60 +148,54 @@
           <div class="mb-4">
             <h3 class="h6 text-secondary text-uppercase mb-2">Parser</h3>
             <ul class="mb-0">
-              <li><strong>What it does:</strong> Validates the VCF, extracts SNV records, and rejects unsupported entries.</li>
-              <li><strong>Key outputs:</strong> Normalized SNV table, exclusion list for non-SNV or malformed variants.</li>
-              <li><strong>Where to view:</strong> Parser tab summarizes counts and exclusions for the run.</li>
-              <li><strong>Why it matters:</strong> Ensures downstream tools only receive analyzable SNVs.</li>
+              <li><strong>Purpose:</strong> Validate the VCF and extract SNV records.</li>
+              <li><strong>Outputs:</strong> SNV table plus exclusions for non-SNV or malformed variants.</li>
+              <li><strong>Where to look:</strong> Parser tab (counts + exclusions).</li>
             </ul>
           </div>
 
           <div class="mb-4">
             <h3 class="h6 text-secondary text-uppercase mb-2">Pre-Annotation</h3>
             <ul class="mb-0">
-              <li><strong>What it does:</strong> Computes base-change context (REF>ALT), substitution class, and nucleotide classes.</li>
-              <li><strong>Key outputs:</strong> Base change, transition/transversion labels, ref/alt class fields.</li>
-              <li><strong>Where to view:</strong> Pre-annotation tab lists per-variant base changes and classes.</li>
-              <li><strong>Why it matters:</strong> Feeds classification and determines eligibility for prediction tools.</li>
+              <li><strong>Purpose:</strong> Compute base-change context and nucleotide class labels.</li>
+              <li><strong>Outputs:</strong> Base change, transition/transversion, ref/alt class fields.</li>
+              <li><strong>Where to look:</strong> Pre-annotation tab.</li>
             </ul>
           </div>
 
           <div class="mb-4">
             <h3 class="h6 text-secondary text-uppercase mb-2">Classification</h3>
             <ul class="mb-0">
-              <li><strong>What it does:</strong> Uses VEP consequence terms to assign variant class (missense, synonymous, nonsense, other).</li>
-              <li><strong>Key outputs:</strong> Classification category plus a reason code that explains the decision.</li>
-              <li><strong>Where to view:</strong> Consequence tab and the variant details panel show category and reason.</li>
-              <li><strong>Why it matters:</strong> Determines which variants proceed to functional prediction.</li>
+              <li><strong>Purpose:</strong> Map VEP consequences into classes (missense, synonymous, nonsense, other).</li>
+              <li><strong>Outputs:</strong> Category plus reason code/message.</li>
+              <li><strong>Where to look:</strong> Consequence tab and variant details panel.</li>
             </ul>
           </div>
 
           <div class="mb-4">
             <h3 class="h6 text-secondary text-uppercase mb-2">Prediction</h3>
             <ul class="mb-0">
-              <li><strong>What it does:</strong> Runs SIFT, PolyPhen-2, and AlphaMissense predictors through VEP plugins where configured.</li>
-              <li><strong>Key outputs:</strong> Predictor scores, labels, source metadata, and reason messages when unavailable.</li>
-              <li><strong>Where to view:</strong> Functional prediction tab and the variant details panel list per-tool outputs.</li>
-              <li><strong>Why it matters:</strong> Provides functional impact estimates for missense variants.</li>
+              <li><strong>Purpose:</strong> Run SIFT, PolyPhen-2, and AlphaMissense predictions (when configured).</li>
+              <li><strong>Outputs:</strong> Scores, labels, provenance, and reason messages when unavailable.</li>
+              <li><strong>Where to look:</strong> Functional prediction tab and variant details panel.</li>
             </ul>
           </div>
 
           <div class="mb-4">
             <h3 class="h6 text-secondary text-uppercase mb-2">Annotation</h3>
             <ul class="mb-0">
-              <li><strong>What it does:</strong> Pulls evidence from dbSNP, ClinVar, and gnomAD (online and/or local VCF sources).</li>
-              <li><strong>Key outputs:</strong> Evidence records with outcome, completeness, source, and retrieval timestamps.</li>
-              <li><strong>Where to view:</strong> Evidence annotation tab shows dbSNP, ClinVar, gnomAD tables and annotated VCF preview.</li>
-              <li><strong>Why it matters:</strong> Anchors variant interpretation with known identifiers and population context.</li>
+              <li><strong>Purpose:</strong> Pull evidence from dbSNP, ClinVar, and gnomAD.</li>
+              <li><strong>Outputs:</strong> Evidence records with outcomes, completeness, and timestamps.</li>
+              <li><strong>Where to look:</strong> Evidence annotation tab (tables + annotated VCF preview).</li>
             </ul>
           </div>
 
           <div>
             <h3 class="h6 text-secondary text-uppercase mb-2">Reporting</h3>
             <ul class="mb-0">
-              <li><strong>What it does:</strong> Aggregates stage outputs into run-level summaries and evidence diagnostics.</li>
-              <li><strong>Key outputs:</strong> Highlights, significant results, and completeness summaries.</li>
-              <li><strong>Where to view:</strong> Reports tab contains summaries, evidence diagnostics, and HTML artifacts when available.</li>
-              <li><strong>Why it matters:</strong> Provides a final, consolidated view of the run for review and export.</li>
+              <li><strong>Purpose:</strong> Aggregate stage outputs into run-level summaries.</li>
+              <li><strong>Outputs:</strong> Highlights, significant results, completeness summaries.</li>
+              <li><strong>Where to look:</strong> Reports tab.</li>
             </ul>
           </div>
         </div>
@@ -169,35 +208,29 @@
           <div class="mb-4">
             <h3 class="h6 text-secondary text-uppercase mb-2">Consequence Annotation</h3>
             <ul class="mb-0">
-              <li><strong>VEP:</strong> Required for classification and prediction. Produces transcript-level consequence terms,
-                gene context, and plugin outputs that feed downstream stages.</li>
-              <li><strong>SnpEff:</strong> Optional local annotation step for additional effect context and diagnostics; results are
-                tracked in the annotation stage when enabled.</li>
-              <li><strong>Configuration note:</strong> VEP relies on a local cache and optional FASTA/plug-in paths. Missing or invalid
-                configuration causes Classification and Prediction to fail with a clear error message.</li>
-              <li><strong>Local databases:</strong> SnpEff uses a local genome database; missing databases are reported in stage results.</li>
+              <li><strong>VEP:</strong> Required for classification and prediction. Needs a local cache and plugin paths.</li>
+              <li><strong>SnpEff:</strong> Optional local annotation. Missing databases surface as annotation-stage errors.</li>
+              <li><strong>Configuration:</strong> Misconfigured caches or paths will fail Classification/Prediction with clear errors.</li>
             </ul>
           </div>
 
           <div class="mb-4">
             <h3 class="h6 text-secondary text-uppercase mb-2">Functional Prediction</h3>
             <ul class="mb-0">
-              <li><strong>SIFT:</strong> Scores amino acid substitutions and labels them as tolerated or deleterious.</li>
-              <li><strong>PolyPhen-2:</strong> Provides probability-based impact predictions with categorical labels.</li>
-              <li><strong>AlphaMissense:</strong> Deep learning-based pathogenicity scoring via VEP plugin data when configured.</li>
-              <li><strong>Applicability:</strong> Prediction outputs are most relevant for missense variants; other classes are flagged as not evaluated.</li>
-              <li><strong>Integration:</strong> Predictor outputs arrive through VEP plugin fields and are surfaced with per-tool reason messages.</li>
+              <li><strong>SIFT:</strong> Substitution impact scores with tolerated/deleterious labels.</li>
+              <li><strong>PolyPhen-2:</strong> Probability-based impact predictions with categorical labels.</li>
+              <li><strong>AlphaMissense:</strong> Deep learning pathogenicity scores via VEP plugin data.</li>
+              <li><strong>Applicability:</strong> Most meaningful for missense variants; others may show not evaluated.</li>
             </ul>
           </div>
 
           <div>
             <h3 class="h6 text-secondary text-uppercase mb-2">Evidence Databases</h3>
             <ul class="mb-0">
-              <li><strong>dbSNP:</strong> Provides rsIDs and metadata for variant identity and cross-references.</li>
-              <li><strong>ClinVar:</strong> Supplies clinical significance assertions and stable ClinVar identifiers when available.</li>
-              <li><strong>gnomAD:</strong> Adds population allele frequency context for prioritization and filtering.</li>
-              <li><strong>Source modes:</strong> Each database can be queried online or via local VCFs; outcomes distinguish not found
-                (no record) from unavailable (source unreachable or misconfigured).</li>
+              <li><strong>dbSNP:</strong> rsIDs and identity cross-references.</li>
+              <li><strong>ClinVar:</strong> Clinical significance assertions and stable identifiers.</li>
+              <li><strong>gnomAD:</strong> Population allele frequency context.</li>
+              <li><strong>Source modes:</strong> Online or local VCFs. Outcomes distinguish <em>not found</em> vs <em>unavailable</em>.</li>
             </ul>
           </div>
         </div>
@@ -214,7 +247,7 @@
               <li><strong>Hybrid:</strong> Combine local sources with online fallback where configured.</li>
             </ul>
             <div class="small text-secondary mt-2">
-              Evidence mode is chosen before starting a run (or before retrying Annotation) and applies to all variants.
+              Evidence mode is configured by deployment and reported in the annotation stage stats.
             </div>
           </div>
           <div class="mb-3">
@@ -222,7 +255,7 @@
             <ul class="mb-0">
               <li><strong>Stop:</strong> Fail the annotation stage and block reporting until evidence issues are resolved.</li>
               <li><strong>Continue:</strong> Allow the run to proceed with evidence marked as partial or unavailable.</li>
-              <li><strong>Transparency:</strong> Every failure is surfaced with a reason message and troubleshooting hint.</li>
+              <li><strong>Where to set:</strong> Choose this in the Start card before running or before retrying Annotation.</li>
             </ul>
           </div>
           <div class="small text-secondary">
@@ -235,31 +268,28 @@
         <div class="card-body">
           <h2 class="h5 mb-3">Results Interpretation and Provenance</h2>
           <div class="mb-3">
-            <h3 class="h6 text-secondary text-uppercase mb-2">Progress vs Results</h3>
+            <h3 class="h6 text-secondary text-uppercase mb-2">Where to Look</h3>
             <ul class="mb-0">
-              <li><strong>Progress tab:</strong> Run summary, stage timeline, logs, and retry/cancel actions.</li>
+              <li><strong>Progress tab:</strong> Run summary, stage timeline, logs, retry/cancel actions.</li>
               <li><strong>Results tab:</strong> Stage outputs, evidence diagnostics, and reporting summaries.</li>
             </ul>
           </div>
           <div class="mb-3">
             <h3 class="h6 text-secondary text-uppercase mb-2">How to Read Results</h3>
             <ul class="mb-0">
-              <li><strong>Reports Summary:</strong> Consolidated narrative of the run outcomes and major findings.</li>
-              <li><strong>Variant Summary:</strong> Per-variant table listing classification, prediction, evidence, and completeness.</li>
-              <li><strong>Stage tabs:</strong> Each stage exposes its own outputs so you can trace how results were produced.</li>
-              <li><strong>Variant details panel:</strong> Click a variant row to see per-tool evidence, scores, and reasons.</li>
-              <li><strong>Evidence diagnostics:</strong> Reports tab shows source-level completeness and any evidence warnings.</li>
-              <li><strong>HTML artifacts:</strong> When available, the Reports tab embeds rendered summaries (tables or plots).</li>
+              <li><strong>Reports Summary:</strong> Consolidated highlights and major findings.</li>
+              <li><strong>Variant table:</strong> Per-variant classification, prediction, evidence, and completeness.</li>
+              <li><strong>Stage tabs:</strong> Trace how each stage produced its outputs.</li>
+              <li><strong>Variant details:</strong> Click a row to see per-tool scores, evidence, and reasons.</li>
             </ul>
           </div>
           <div class="mb-3">
             <h3 class="h6 text-secondary text-uppercase mb-2">Completeness and Provenance</h3>
             <ul class="mb-0">
-              <li><strong>Completeness:</strong> Complete means all configured sources responded, partial means one or more sources are missing,
-                unavailable means no sources responded, and failed indicates a stage-level error.</li>
-              <li><strong>Outcome fields:</strong> Each tool/source reports success, not found, unavailable, or error outcomes.</li>
-              <li><strong>Reason fields:</strong> Human-readable messages explain missing data, timeouts, or configuration gaps.</li>
-              <li><strong>Provenance fields:</strong> Each record includes tool/source labels and retrieval timestamps.</li>
+              <li><strong>Completeness:</strong> Complete = all sources responded, Partial = some missing, Unavailable = none responded.</li>
+              <li><strong>Outcomes:</strong> Each tool/source reports success, not found, unavailable, or error.</li>
+              <li><strong>Reasons:</strong> Human-readable messages explain missing data or configuration gaps.</li>
+              <li><strong>Provenance:</strong> Records include tool/source labels and retrieval timestamps.</li>
             </ul>
           </div>
           <div class="small text-secondary">
@@ -273,31 +303,28 @@
           <h2 class="h5 mb-3">Troubleshooting and FAQ</h2>
           <ul class="mb-0">
             <li>
-              <strong>Validation fails immediately:</strong> Confirm the VCF header and REF/ALT fields are valid SNVs.
+              <strong>Validation fails immediately:</strong> Fix malformed headers or invalid REF/ALT SNVs.
             </li>
             <li>
-              <strong>No runs visible:</strong> Upload a VCF and press Start. The run summary populates after validation.
+              <strong>No runs visible:</strong> Upload a VCF and press Start. The run appears after validation.
             </li>
             <li>
-              <strong>Classification fails:</strong> Verify VEP configuration and cache paths, then retry the Classification stage.
+              <strong>Classification fails:</strong> Verify VEP configuration and cache paths, then retry.
             </li>
             <li>
-              <strong>Prediction missing outputs:</strong> Check VEP plugin setup (SIFT, PolyPhen-2, AlphaMissense) and rerun Prediction.
+              <strong>Prediction missing outputs:</strong> Check VEP plugin setup (SIFT, PolyPhen-2, AlphaMissense).
             </li>
             <li>
-              <strong>Evidence sources unavailable:</strong> Check connectivity or local VCF paths; retry Annotation once resolved.
+              <strong>Evidence sources unavailable:</strong> Check connectivity or local VCF paths; retry Annotation.
             </li>
             <li>
-              <strong>gnomAD lookup errors:</strong> Ensure API connectivity or local dataset compatibility for the configured build.
+              <strong>gnomAD lookup errors:</strong> Verify API connectivity or local dataset compatibility.
             </li>
             <li>
-              <strong>Partial results:</strong> Use Evidence diagnostics to identify which sources failed and why.
+              <strong>Partial results:</strong> Use Evidence diagnostics to see which sources failed and why.
             </li>
             <li>
-              <strong>Runs look stale after reload:</strong> Reopen the last run in the Results tab to refresh summaries.
-            </li>
-            <li>
-              <strong>Reference build mismatch:</strong> Re-run the pipeline with the correct build to improve evidence matches.
+              <strong>Reference build mismatch:</strong> Re-run with the correct build to improve evidence matches.
             </li>
           </ul>
         </div>
